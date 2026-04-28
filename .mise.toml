@@ -1,0 +1,19 @@
+[tools]
+python = "3.12"
+uv = "latest"
+
+[tasks.sync]
+description = "Install all dependencies with uv"
+run = "uv sync --all-extras --dev"
+
+[tasks.test]
+description = "Run unit and route tests"
+run = "uv run pytest"
+
+[tasks.serve]
+description = "Run FastAPI locally"
+run = "uv run uvicorn parakeetx_api_server.main:app --host ${UVICORN_HOST:-0.0.0.0} --port ${UVICORN_PORT:-7317}"
+
+[tasks.lock]
+description = "Refresh uv.lock"
+run = "uv lock"

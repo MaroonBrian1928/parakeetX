@@ -1,0 +1,12 @@
+services:
+  api-cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    env_file:
+      - .env
+    environment:
+      PARAKEET__DEVICE: cpu
+      DIARIZATION__DEVICE: cpu
+    ports:
+      - "${HOST_PORT_CPU:-7474}:${UVICORN_PORT:-7317}"

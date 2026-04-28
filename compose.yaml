@@ -1,0 +1,18 @@
+services:
+  api-cuda:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    env_file:
+      - .env
+    environment:
+      PARAKEET__DEVICE: ${PARAKEET__DEVICE_CUDA:-cuda}
+      DIARIZATION__DEVICE: ${DIARIZATION__DEVICE_CUDA:-cpu}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+    ports:
+      - "${HOST_PORT_CUDA:-7373}:${UVICORN_PORT:-7317}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]

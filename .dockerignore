@@ -1,0 +1,34 @@
+# VCS and editor metadata
+.git
+.gitignore
+.codegraph/
+.codex
+.vscode/
+.idea/
+
+# Python caches and virtualenvs
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Test and local-only artifacts
+tests/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Local secrets/config not needed at build time
+.env
+.env.*
+
+# Non-runtime project files not needed in final image build context
+compose.yaml
+compose.cpu.yaml
+firstTry.plan
