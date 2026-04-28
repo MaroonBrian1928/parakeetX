@@ -24,8 +24,13 @@ jobs:
         include:
           - variant: cpu
             dockerfile: Dockerfile.cpu
+            cache-mode: max
+            build-args: ""
           - variant: cuda
             dockerfile: Dockerfile.cuda
+            cache-mode: min
+            build-args: |
+              UV_TORCH_INSTALL_FLAGS=--no-cache
 
     steps:
       - name: Check out repository
@@ -37,6 +42,20 @@ jobs:
         run: |
           image_name="${IMAGE_NAME,,}"
           echo "name=${REGISTRY}/${image_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Free disk space for CUDA image build
+        if: matrix.variant == 'cuda'
+        shell: bash
+        run: |
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          sudo docker system prune --all --force
+          df -h
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -62,5 +81,6 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=ParakeetX API Server (${{ matrix.variant }})
+          build-args: ${{ matrix.build-args }}
           cache-from: type=gha,scope=${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=${{ matrix.cache-mode }},scope=${{ matrix.variant }}

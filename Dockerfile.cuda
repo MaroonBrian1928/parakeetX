@@ -11,6 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 ARG TORCH_VERSION=2.5.1
 ARG TORCHAUDIO_VERSION=2.5.1
 ARG PYTORCH_CUDA_FLAVOR=cu118
+ARG UV_TORCH_INSTALL_FLAGS=
 
 WORKDIR /app
 
@@ -28,8 +29,9 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     --no-install-package torchaudio
 
 # Override lockfile's cu13 torch stack with a Maxwell-friendlier CUDA wheel set.
+# GitHub Actions can set UV_TORCH_INSTALL_FLAGS=--no-cache to reduce peak disk use.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    uv pip install --python /app/.venv/bin/python \
+    uv pip install ${UV_TORCH_INSTALL_FLAGS} --python /app/.venv/bin/python \
     --index-url "https://download.pytorch.org/whl/${PYTORCH_CUDA_FLAVOR}" \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}"
