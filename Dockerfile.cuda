@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -20,18 +22,14 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project --extra nemo --extra diarization --extra cuda \
-    --no-install-package torch \
-    --no-install-package torchaudio
-
-COPY src ./src
-COPY README.md ./
-RUN uv sync --frozen --no-dev --no-editable --extra nemo --extra diarization --extra cuda \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    uv sync --frozen --no-dev --no-install-project --extra nemo --extra diarization --extra cuda \
     --no-install-package torch \
     --no-install-package torchaudio
 
 # Override lockfile's cu13 torch stack with a Maxwell-friendlier CUDA wheel set.
-RUN uv pip install --python /app/.venv/bin/python \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    uv pip install --python /app/.venv/bin/python \
     --index-url "https://download.pytorch.org/whl/${PYTORCH_CUDA_FLAVOR}" \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}"
@@ -41,16 +39,18 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH="/app/src" \
     PATH="/app/.venv/bin:${PATH}"
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libsndfile1 \
+    && apt-get install -y --no-install-recommends libsndfile1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /root/.local/share/uv/python /root/.local/share/uv/python
+COPY src ./src
 
 EXPOSE 7317
 CMD ["sh", "-c", "uvicorn parakeetx_api_server.main:app --host ${UVICORN_HOST:-0.0.0.0} --port ${UVICORN_PORT:-7317}"]

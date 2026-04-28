@@ -20,6 +20,28 @@ SUPPORTED_RESPONSE_FORMATS = {"json", "text", "srt", "vtt", "verbose_json", "dia
 SUPPORTED_TIMESTAMP_GRANULARITIES = {"word", "segment"}
 
 
+def _friendly_runtime_error_detail(exc: RuntimeError) -> str:
+    detail = str(exc).strip()
+    lowered = detail.lower()
+
+    if "out of memory" in lowered:
+        return (
+            f"{detail} "
+            "Hint: GPU memory is too tight for this request. Try `diarize=false`, shorter audio, "
+            "or set `PARAKEET__DEVICE_CUDA=cpu` (and optionally `DIARIZATION__DEVICE_CUDA=cpu`)."
+        )
+
+    if "invalid ptx" in lowered or "cuda error: invalid argument" in lowered:
+        return (
+            f"{detail} "
+            "Hint: this GPU/runtime combo is incompatible with the current CUDA decoder path. "
+            "Set `PARAKEET__DEVICE_CUDA=cpu` (and optionally `DIARIZATION__DEVICE_CUDA=cpu`) "
+            "to run reliably on this host."
+        )
+
+    return detail
+
+
 @router.post("/transcriptions", dependencies=[Depends(require_api_key)])
 async def create_transcription(
     request: Request,
@@ -166,9 +188,14 @@ async def create_transcription(
             num_speakers=num_speakers,
         )
     except ValueError as exc:
+        logger.warning("Transcription rejected: %s", exc)
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        logger.exception("Transcription runtime error")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_friendly_runtime_error_detail(exc),
+        ) from exc
 
     payload["model"] = resolved_model
 

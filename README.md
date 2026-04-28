@@ -80,6 +80,8 @@ Subtitle formats (`srt` / `vtt`) prefix cues with speaker labels when available.
 - `POST /v1/models/diarization/unload`
 
 CUDA unload attempts `torch.cuda.empty_cache()`.
+When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
+Adaptive chunking includes GPU profiles (for example, conservative chunking on TITAN-era cards and larger chunks on newer high-end GPUs), and each request logs its chosen chunk plan at transcription start.
 
 ## Environment Variables
 
@@ -91,6 +93,12 @@ Core env vars:
 - `PARAKEET__DEVICE`
 - `PARAKEET__PRELOAD_MODEL`
 - `PARAKEET__LOCAL_FILES_ONLY`
+- `PARAKEET__CUDA_HALF_PRECISION`
+- `PARAKEET__CUDA_ADAPTIVE_CHUNKING`
+- `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE`
+- `PARAKEET__CUDA_CHUNK_MIN_SECONDS`
+- `PARAKEET__CUDA_CHUNK_MAX_SECONDS`
+- `PARAKEET__CUDA_CHUNK_OVERLAP_SECONDS`
 - `DIARIZATION__MODEL_NAME`
 - `DIARIZATION__DEVICE`
 - `DIARIZATION__PRELOAD_MODEL`

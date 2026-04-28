@@ -11,6 +11,12 @@ class ParakeetSettings(BaseModel):
     device: str = "cpu"
     preload_model: bool = False
     local_files_only: bool = False
+    cuda_half_precision: bool = True
+    cuda_adaptive_chunking: bool = True
+    cuda_chunk_seconds_override: int | None = Field(default=None, ge=1)
+    cuda_chunk_min_seconds: int = Field(default=30, ge=1)
+    cuda_chunk_max_seconds: int = Field(default=360, ge=1)
+    cuda_chunk_overlap_seconds: float = Field(default=0.0, ge=0.0, le=10.0)
 
 
 class DiarizationSettings(BaseModel):

@@ -4,6 +4,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import soundfile as sf
+
 from ..config import DiarizationSettings
 
 
@@ -41,10 +44,17 @@ class DiarizationModelManager:
                     "pyannote-audio is not installed. Install with `uv sync --extra diarization`."
                 ) from exc
 
-            pipeline = Pipeline.from_pretrained(
-                self._settings.model_name,
-                use_auth_token=self._hf_token,
-            )
+            try:
+                pipeline = Pipeline.from_pretrained(
+                    self._settings.model_name,
+                    token=self._hf_token,
+                )
+            except TypeError:
+                # Backward compatibility with older pyannote versions.
+                pipeline = Pipeline.from_pretrained(
+                    self._settings.model_name,
+                    use_auth_token=self._hf_token,
+                )
 
             if self._settings.device.startswith("cuda"):
                 try:
@@ -94,9 +104,30 @@ class DiarizationModelManager:
         if num_speakers is not None:
             kwargs["num_speakers"] = num_speakers
 
-        annotation = pipeline(str(audio_path), **kwargs)
+        waveform, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+        mono = np.asarray(waveform, dtype=np.float32).mean(axis=1)
+        import torch
+
+        audio_input = {
+            "waveform": torch.from_numpy(mono).unsqueeze(0),
+            "sample_rate": int(sample_rate),
+        }
+
+        annotation = pipeline(audio_input, **kwargs)
+
+        iterable_annotation = annotation
+        if not hasattr(iterable_annotation, "itertracks"):
+            wrapped = getattr(annotation, "speaker_diarization", None)
+            if wrapped is not None and hasattr(wrapped, "itertracks"):
+                iterable_annotation = wrapped
+
+        if not hasattr(iterable_annotation, "itertracks"):
+            raise RuntimeError(
+                f"Unsupported diarization output type: {type(annotation).__name__}"
+            )
+
         diarization_segments: list[dict[str, Any]] = []
-        for segment, _, speaker in annotation.itertracks(yield_label=True):
+        for segment, _, speaker in iterable_annotation.itertracks(yield_label=True):
             diarization_segments.append(
                 {
                     "start": float(segment.start),
