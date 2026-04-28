@@ -32,6 +32,7 @@ class FakeTranscriptionService:
                     "word": "hello",
                     "start": 0.0,
                     "end": 0.4,
+                    "confidence": 0.91,
                     "speaker": "SPEAKER_00" if diarize else None,
                 }
             ],
@@ -84,6 +85,8 @@ def test_transcription_verbose_json_includes_speakers(client, wav_bytes):
     body = response.json()
     assert body["segments"][0]["speaker"] == "SPEAKER_00"
     assert body["words"][0]["speaker"] == "SPEAKER_00"
+    assert body["word_segments"][0]["score"] == 0.91
+    assert body["segments"][0]["words"] == body["word_segments"]
 
 
 def test_unsupported_feature_failures(client, wav_bytes):

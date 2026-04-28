@@ -22,6 +22,7 @@ def _payload():
                 "word": "hello",
                 "start": 0.0,
                 "end": 0.5,
+                "confidence": 0.91,
                 "speaker": "SPEAKER_00",
             }
         ],
@@ -34,6 +35,22 @@ def test_verbose_json_contains_diarization_and_speakers():
     assert verbose["segments"][0]["speaker"] == "SPEAKER_00"
     assert verbose["words"][0]["speaker"] == "SPEAKER_00"
     assert verbose["diarization"][0]["speaker"] == "SPEAKER_00"
+
+
+def test_verbose_json_matches_whisperx_word_timestamp_shape():
+    verbose = as_verbose_json(_payload())
+
+    assert verbose["word_segments"] == [
+        {
+            "word": "hello",
+            "start": 0.0,
+            "end": 0.5,
+            "score": 0.91,
+            "speaker": "SPEAKER_00",
+        }
+    ]
+    assert verbose["words"] == verbose["word_segments"]
+    assert verbose["segments"][0]["words"] == verbose["word_segments"]
 
 
 def test_srt_and_vtt_prefix_speaker_labels():

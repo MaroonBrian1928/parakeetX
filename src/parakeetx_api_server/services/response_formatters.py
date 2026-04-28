@@ -12,13 +12,17 @@ def as_json(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def as_verbose_json(payload: dict[str, Any]) -> dict[str, Any]:
+    word_segments = [_as_whisperx_word(word) for word in payload.get("words", [])]
+    segments = _segments_with_words(payload.get("segments", []), word_segments)
+
     return {
         "task": "transcribe",
         "language": payload.get("language", "en"),
-        "duration": _duration(payload.get("segments", [])),
+        "duration": _duration(segments),
         "text": payload.get("text", ""),
-        "words": payload.get("words", []),
-        "segments": payload.get("segments", []),
+        "words": word_segments,
+        "word_segments": word_segments,
+        "segments": segments,
         "diarization": payload.get("diarization", []),
         "model": payload.get("model"),
     }
@@ -37,6 +41,57 @@ def _duration(segments: list[dict[str, Any]]) -> float:
     if not segments:
         return 0.0
     return float(max(float(s.get("end", 0.0)) for s in segments))
+
+
+def _segments_with_words(
+    segments: list[dict[str, Any]],
+    word_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+
+    for segment in segments:
+        segment_start = float(segment.get("start", 0.0))
+        segment_end = float(segment.get("end", 0.0))
+        segment_words = [
+            word
+            for word in word_segments
+            if _word_belongs_to_segment(word, segment_start, segment_end)
+        ]
+
+        output_segment = dict(segment)
+        output_segment["words"] = segment_words
+        output.append(output_segment)
+
+    return output
+
+
+def _word_belongs_to_segment(
+    word: dict[str, Any],
+    segment_start: float,
+    segment_end: float,
+) -> bool:
+    word_start = float(word.get("start", 0.0))
+    word_end = float(word.get("end", word_start))
+    word_midpoint = word_start + max(0.0, word_end - word_start) / 2.0
+    return segment_start <= word_midpoint <= segment_end
+
+
+def _as_whisperx_word(word: dict[str, Any]) -> dict[str, Any]:
+    output = {
+        "word": word.get("word", ""),
+        "start": word.get("start", 0.0),
+        "end": word.get("end", 0.0),
+    }
+
+    score = word.get("score", word.get("confidence"))
+    if score is not None:
+        output["score"] = score
+
+    speaker = word.get("speaker")
+    if speaker:
+        output["speaker"] = speaker
+
+    return output
 
 
 def _subtitle(segments: list[dict[str, Any]], *, vtt: bool) -> str:
