@@ -11,13 +11,20 @@ from .services.transcription import TranscriptionService
 @lru_cache
 def get_parakeet_manager() -> ParakeetModelManager:
     settings = get_settings()
-    return ParakeetModelManager(settings.parakeet)
+    return ParakeetModelManager(
+        settings.parakeet,
+        idle_evict_minutes=settings.model_idle_evict_minutes,
+    )
 
 
 @lru_cache
 def get_diarization_manager() -> DiarizationModelManager:
     settings = get_settings()
-    return DiarizationModelManager(settings.diarization, settings.hf_token)
+    return DiarizationModelManager(
+        settings.diarization,
+        settings.hf_token,
+        idle_evict_minutes=settings.model_idle_evict_minutes,
+    )
 
 
 @lru_cache

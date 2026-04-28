@@ -12,6 +12,7 @@ import soundfile as sf
 
 from ..config import ParakeetSettings
 from ..log_filters import install_noisy_dependency_log_filters
+from .idle_eviction import IdleModelEvictor
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,21 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 class ParakeetModelManager:
-    def __init__(self, settings: ParakeetSettings) -> None:
+    def __init__(
+        self,
+        settings: ParakeetSettings,
+        *,
+        idle_evict_minutes: float | None = None,
+    ) -> None:
         self._settings = settings
         self._model: Any | None = None
         self._lock = threading.Lock()
+        self._idle_evictor = IdleModelEvictor(
+            model_label="parakeet",
+            idle_minutes=idle_evict_minutes,
+            is_loaded=lambda: self._model is not None,
+            unload=self.unload_model,
+        )
 
     @property
     def configured_model_name(self) -> str:
@@ -38,6 +50,7 @@ class ParakeetModelManager:
             "loaded": self._model is not None,
             "model_name": self._settings.model_name,
             "device": self._settings.device,
+            "idle_evict_minutes": self._idle_evictor.idle_minutes,
         }
 
     def load_model(self) -> dict[str, Any]:
@@ -61,6 +74,7 @@ class ParakeetModelManager:
             self._configure_cuda_runtime(self._model)
             self._configure_decoding(self._model)
 
+        self._idle_evictor.note_loaded()
         return self.status()
 
     def _configure_cuda_runtime(self, model: Any) -> None:
@@ -107,6 +121,7 @@ class ParakeetModelManager:
     def unload_model(self) -> dict[str, Any]:
         with self._lock:
             self._model = None
+            self._idle_evictor.cancel()
             if self._settings.device.startswith("cuda"):
                 try:
                     import torch
@@ -125,27 +140,28 @@ class ParakeetModelManager:
         if language and language.lower() not in {"en", "english"}:
             raise ValueError("Only English transcription is supported")
 
-        model = self._model
-        if model is None:
-            self.load_model()
+        with self._idle_evictor.use():
             model = self._model
+            if model is None:
+                self.load_model()
+                model = self._model
 
-        if model is None:
-            raise RuntimeError("Parakeet model failed to load")
+            if model is None:
+                raise RuntimeError("Parakeet model failed to load")
 
-        install_noisy_dependency_log_filters()
-        chunk_plan = self._resolve_chunk_plan(audio_path)
-        self._log_chunk_plan(audio_path, chunk_plan)
-        chunk_seconds = chunk_plan["chunk_seconds"]
-        if chunk_seconds is None:
-            raw = model.transcribe([str(audio_path)], timestamps=True)
-            return self._normalize_raw_result(raw)
+            install_noisy_dependency_log_filters()
+            chunk_plan = self._resolve_chunk_plan(audio_path)
+            self._log_chunk_plan(audio_path, chunk_plan)
+            chunk_seconds = chunk_plan["chunk_seconds"]
+            if chunk_seconds is None:
+                raw = model.transcribe([str(audio_path)], timestamps=True)
+                return self._normalize_raw_result(raw)
 
-        return self._transcribe_chunked(
-            model=model,
-            audio_path=audio_path,
-            chunk_seconds=chunk_seconds,
-        )
+            return self._transcribe_chunked(
+                model=model,
+                audio_path=audio_path,
+                chunk_seconds=chunk_seconds,
+            )
 
     def _resolve_chunk_seconds(self, audio_path: Path) -> int | None:
         return self._resolve_chunk_plan(audio_path)["chunk_seconds"]
@@ -499,42 +515,42 @@ def _get_field(item: Any, *names: str, default: Any = None) -> Any:
 
 def _chunk_seconds_for_available_gib(available_gib: float) -> int:
     if available_gib >= 24.0:
-        return 360
+        return 1200
     if available_gib >= 16.0:
-        return 240
+        return 900
     if available_gib >= 10.0:
-        return 150
+        return 600
     if available_gib >= 6.0:
-        return 90
+        return 360
     if available_gib >= 3.0:
-        return 60
+        return 120
     return 30
 
 
 def _chunk_seconds_for_gpu_profile(available_gib: float, *, profile: str) -> int:
     if profile == "legacy_titan":
         if available_gib >= 10.0:
-            return 210
+            return 900
         if available_gib >= 8.0:
-            return 180
+            return 720
         if available_gib >= 6.0:
-            return 150
+            return 600
         if available_gib >= 3.0:
-            return 90
-        return 30
+            return 180
+        return 90
 
     if profile == "modern_high_end":
         if available_gib >= 24.0:
-            return 480
+            return 1200
         if available_gib >= 16.0:
-            return 360
+            return 900
         if available_gib >= 10.0:
-            return 240
+            return 600
         if available_gib >= 6.0:
-            return 150
+            return 420
         if available_gib >= 3.0:
-            return 90
-        return 45
+            return 180
+        return 90
 
     return _chunk_seconds_for_available_gib(available_gib)
 

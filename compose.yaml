@@ -1,5 +1,6 @@
 services:
   api-cuda:
+    image: ghcr.io/maroonbrian1928/parakeetx:cuda
     build:
       context: .
       dockerfile: Dockerfile.cuda

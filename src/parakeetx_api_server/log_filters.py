@@ -5,6 +5,8 @@ import logging
 _SUPPRESSED_MESSAGE_FRAGMENTS = (
     "You are using a non-tarred dataset and requested tokenization during data sampling",
     "The following configuration keys are ignored by Lhotse dataloader: use_start_end_token",
+    "If you intend to do training, please call the ModelPT.setup_training_data()",
+    "If you intend to do validation, please call the ModelPT.setup_validation_data()",
 )
 
 

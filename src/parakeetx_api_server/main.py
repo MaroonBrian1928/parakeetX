@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import time
 import warnings
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from .config import get_settings
 from .deps import (
@@ -24,6 +26,30 @@ app = FastAPI(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.middleware("http")
+async def log_transcription_request_wall_time(request: Request, call_next):
+    if request.url.path != "/v1/audio/transcriptions":
+        return await call_next(request)
+
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        _emit_transcription_http_timing(
+            started_at,
+            status="error",
+            extra=f"method={request.method} error={type(exc).__name__}",
+        )
+        raise
+
+    _emit_transcription_http_timing(
+        started_at,
+        status=str(response.status_code),
+        extra=f"method={request.method}",
+    )
+    return response
 
 
 @app.on_event("startup")
@@ -58,3 +84,20 @@ async def startup() -> None:
 app.include_router(transcriptions.router)
 app.include_router(translations.router)
 app.include_router(models.router)
+
+
+def _emit_transcription_http_timing(
+    started_at: float,
+    *,
+    status: str,
+    extra: str,
+) -> None:
+    elapsed = time.perf_counter() - started_at
+    print(
+        (
+            "Transcription timing: stage=http_request "
+            f"elapsed={elapsed:.2f}s total={elapsed:.2f}s status={status} {extra}"
+        ),
+        file=sys.stderr,
+        flush=True,
+    )

@@ -25,19 +25,19 @@ def _write_silent_wav(path: Path, *, duration_seconds: float, sample_rate: int =
 
 def test_chunk_seconds_for_available_gib_thresholds() -> None:
     assert _chunk_seconds_for_available_gib(2.9) == 30
-    assert _chunk_seconds_for_available_gib(3.0) == 60
-    assert _chunk_seconds_for_available_gib(6.0) == 90
-    assert _chunk_seconds_for_available_gib(10.0) == 150
-    assert _chunk_seconds_for_available_gib(16.0) == 240
-    assert _chunk_seconds_for_available_gib(24.0) == 360
+    assert _chunk_seconds_for_available_gib(3.0) == 120
+    assert _chunk_seconds_for_available_gib(6.0) == 360
+    assert _chunk_seconds_for_available_gib(10.0) == 600
+    assert _chunk_seconds_for_available_gib(16.0) == 900
+    assert _chunk_seconds_for_available_gib(24.0) == 1200
 
 
 def test_chunk_seconds_for_legacy_titan_profile() -> None:
-    assert _chunk_seconds_for_gpu_profile(2.9, profile="legacy_titan") == 30
-    assert _chunk_seconds_for_gpu_profile(3.0, profile="legacy_titan") == 90
-    assert _chunk_seconds_for_gpu_profile(6.0, profile="legacy_titan") == 150
-    assert _chunk_seconds_for_gpu_profile(8.0, profile="legacy_titan") == 180
-    assert _chunk_seconds_for_gpu_profile(10.0, profile="legacy_titan") == 210
+    assert _chunk_seconds_for_gpu_profile(2.9, profile="legacy_titan") == 90
+    assert _chunk_seconds_for_gpu_profile(3.0, profile="legacy_titan") == 180
+    assert _chunk_seconds_for_gpu_profile(6.0, profile="legacy_titan") == 720
+    assert _chunk_seconds_for_gpu_profile(8.0, profile="legacy_titan") == 900
+    assert _chunk_seconds_for_gpu_profile(10.0, profile="legacy_titan") == 1080
 
 
 def test_gpu_chunk_profile_detection() -> None:
@@ -55,7 +55,7 @@ def test_resolve_chunk_seconds_uses_available_cuda_memory(monkeypatch: pytest.Mo
         device="cuda",
         cuda_adaptive_chunking=True,
         cuda_chunk_min_seconds=30,
-        cuda_chunk_max_seconds=360,
+        cuda_chunk_max_seconds=1200,
     )
     manager = ParakeetModelManager(settings)
     monkeypatch.setattr(manager, "_available_cuda_memory_gib", lambda: 5.5)
@@ -65,7 +65,7 @@ def test_resolve_chunk_seconds_uses_available_cuda_memory(monkeypatch: pytest.Mo
         lambda: (5.5, 12.0, "NVIDIA GeForce GTX TITAN X"),
     )
 
-    assert manager._resolve_chunk_seconds(audio_path) == 90
+    assert manager._resolve_chunk_seconds(audio_path) == 180
 
 
 def test_transcribe_chunked_merges_offsets(tmp_path: Path) -> None:

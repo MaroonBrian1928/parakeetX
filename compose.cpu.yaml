@@ -1,5 +1,6 @@
 services:
   api-cpu:
+    image: ghcr.io/maroonbrian1928/parakeetx:cpu
     build:
       context: .
       dockerfile: Dockerfile.cpu

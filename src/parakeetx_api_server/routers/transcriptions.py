@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -67,6 +69,7 @@ async def create_transcription(
     forced_alignment: bool = Form(default=False),
     service: TranscriptionService = Depends(get_transcription_service),
 ):
+    route_started = time.perf_counter()
     _ = speaker_embeddings
     _ = highlight_words
 
@@ -179,6 +182,7 @@ async def create_transcription(
         )
 
     try:
+        stage_started = time.perf_counter()
         payload = await service.transcribe_upload(
             upload=file,
             language=language,
@@ -187,6 +191,7 @@ async def create_transcription(
             max_speakers=max_speakers,
             num_speakers=num_speakers,
         )
+        _emit_route_timing("route_service", stage_started, route_started=route_started)
     except ValueError as exc:
         logger.warning("Transcription rejected: %s", exc)
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
@@ -199,22 +204,44 @@ async def create_transcription(
 
     payload["model"] = resolved_model
 
+    stage_started = time.perf_counter()
     if response_format == "text":
-        return PlainTextResponse(as_text(payload), media_type="text/plain; charset=utf-8")
+        response = PlainTextResponse(as_text(payload), media_type="text/plain; charset=utf-8")
+    elif response_format == "json":
+        response = JSONResponse(as_json(payload))
+    elif response_format == "diarized_json":
+        response = JSONResponse(as_verbose_json(payload))
+    elif response_format == "verbose_json":
+        response = JSONResponse(as_verbose_json(payload))
+    elif response_format == "srt":
+        response = PlainTextResponse(as_srt(payload), media_type="text/plain; charset=utf-8")
+    elif response_format == "vtt":
+        response = PlainTextResponse(as_vtt(payload), media_type="text/plain; charset=utf-8")
+    else:
+        raise HTTPException(status_code=500, detail="Unexpected response format")
 
-    if response_format == "json":
-        return JSONResponse(as_json(payload))
+    _emit_route_timing(
+        "route_response_format",
+        stage_started,
+        route_started=route_started,
+        extra=f"format={response_format}",
+    )
+    _emit_route_timing("route_total", route_started, route_started=route_started)
+    return response
 
-    if response_format == "diarized_json":
-        return JSONResponse(as_verbose_json(payload))
 
-    if response_format == "verbose_json":
-        return JSONResponse(as_verbose_json(payload))
-
-    if response_format == "srt":
-        return PlainTextResponse(as_srt(payload), media_type="text/plain; charset=utf-8")
-
-    if response_format == "vtt":
-        return PlainTextResponse(as_vtt(payload), media_type="text/plain; charset=utf-8")
-
-    raise HTTPException(status_code=500, detail="Unexpected response format")
+def _emit_route_timing(
+    stage: str,
+    started_at: float,
+    *,
+    route_started: float,
+    extra: str | None = None,
+) -> None:
+    elapsed = time.perf_counter() - started_at
+    total = time.perf_counter() - route_started
+    suffix = f" {extra}" if extra else ""
+    print(
+        f"Transcription timing: stage={stage} elapsed={elapsed:.2f}s total={total:.2f}s{suffix}",
+        file=sys.stderr,
+        flush=True,
+    )

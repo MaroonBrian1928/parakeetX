@@ -11,6 +11,7 @@ def test_parses_nested_config(monkeypatch):
     monkeypatch.setenv("PARAKEET__CUDA_CHUNK_MIN_SECONDS", "45")
     monkeypatch.setenv("DIARIZATION__PRELOAD_MODEL", "true")
     monkeypatch.setenv("MAX_CONCURRENT_TRANSCRIPTIONS", "7")
+    monkeypatch.setenv("MODEL_IDLE_EVICT_MINUTES", "15")
 
     settings = Settings()
 
@@ -19,4 +20,5 @@ def test_parses_nested_config(monkeypatch):
     assert settings.parakeet.cuda_chunk_min_seconds == 45
     assert settings.diarization.preload_model is True
     assert settings.max_concurrent_transcriptions == 7
+    assert settings.model_idle_evict_minutes == 15
     assert settings.configured_api_keys() == {"k1"}

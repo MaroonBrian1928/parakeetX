@@ -32,6 +32,7 @@ def clear_dependency_caches(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("DIARIZATION__DEVICE", raising=False)
     monkeypatch.delenv("DIARIZATION__PRELOAD_MODEL", raising=False)
     monkeypatch.delenv("MAX_CONCURRENT_TRANSCRIPTIONS", raising=False)
+    monkeypatch.delenv("MODEL_IDLE_EVICT_MINUTES", raising=False)
 
     from parakeetx_api_server.config import get_settings
 

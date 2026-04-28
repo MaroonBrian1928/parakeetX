@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,7 +15,7 @@ class ParakeetSettings(BaseModel):
     cuda_adaptive_chunking: bool = True
     cuda_chunk_seconds_override: int | None = Field(default=None, ge=1)
     cuda_chunk_min_seconds: int = Field(default=30, ge=1)
-    cuda_chunk_max_seconds: int = Field(default=360, ge=1)
+    cuda_chunk_max_seconds: int = Field(default=1200, ge=1)
     cuda_chunk_overlap_seconds: float = Field(default=0.0, ge=0.0, le=10.0)
 
 
@@ -40,9 +40,17 @@ class Settings(BaseSettings):
 
     max_concurrent_transcriptions: int = 2
     debug_log_transcription_payload: bool = False
+    model_idle_evict_minutes: float | None = Field(default=None, ge=0)
 
     uvicorn_host: str = "0.0.0.0"
     uvicorn_port: int = 7317
+
+    @field_validator("model_idle_evict_minutes", mode="before")
+    @classmethod
+    def _empty_idle_evict_minutes_as_none(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
 
     def configured_api_keys(self) -> set[str]:
         keys: set[str] = set()
