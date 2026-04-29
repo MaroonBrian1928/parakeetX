@@ -530,11 +530,11 @@ def _chunk_seconds_for_available_gib(available_gib: float) -> int:
 def _chunk_seconds_for_gpu_profile(available_gib: float, *, profile: str) -> int:
     if profile == "legacy_titan":
         if available_gib >= 10.0:
-            return 900
+            return 1080
         if available_gib >= 8.0:
-            return 720
+            return 900
         if available_gib >= 6.0:
-            return 600
+            return 720
         if available_gib >= 3.0:
             return 180
         return 90
