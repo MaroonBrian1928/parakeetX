@@ -513,30 +513,6 @@ def _get_field(item: Any, *names: str, default: Any = None) -> Any:
 
 
 def _chunk_seconds_for_available_gib(available_gib: float) -> int:
-    if available_gib >= 24.0:
-        return 2400
-    if available_gib >= 22.5:
-        return 2250
-    if available_gib >= 21.0:
-        return 2100
-    if available_gib >= 19.5:
-        return 1950
-    if available_gib >= 18.0:
-        return 1800
-    if available_gib >= 16.5:
-        return 1650
-    if available_gib >= 15.0:
-        return 1500
-    if available_gib >= 13.5:
-        return 1350
-    if available_gib >= 12.0:
-        return 1200
-    if available_gib >= 10.5:
-        return 1050
-    if available_gib >= 9.0:
-        return 900
-    if available_gib >= 7.5:
-        return 750
     if available_gib >= 6.0:
         return 600
     if available_gib >= 4.5:

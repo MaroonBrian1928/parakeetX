@@ -127,7 +127,8 @@ Subtitle formats (`srt` / `vtt`) prefix cues with speaker labels when available.
 
 CUDA unload attempts `torch.cuda.empty_cache()`.
 When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
-Adaptive chunking uses one memory-based ladder in 1.5 GiB steps and logs the chosen chunk plan at transcription start.
+Adaptive chunking uses a conservative memory-based ladder, caps chunks at 600 seconds by default, and logs the chosen chunk plan at transcription start.
+If CUDA reports `device not ready`, lower `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE` to a value such as `120` or reduce `PARAKEET__CUDA_CHUNK_MAX_SECONDS`.
 Maxwell/TITAN-era CUDA runs switch NeMo decoding from `greedy_batch` to `greedy` to avoid CUDA graph decoder compatibility failures while keeping ASR on GPU.
 The default CUDA Docker image uses a CUDA 12.8 runtime and PyTorch CUDA 12.8 wheels so RTX 50-series / Blackwell GPUs can run kernels for their newer compute capability.
 

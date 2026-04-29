@@ -111,6 +111,15 @@ def test_cuda_kernel_image_error_mentions_blackwell_image_rebuild():
     assert "PyTorch CUDA 12.8+ wheels" in detail
 
 
+def test_cuda_device_not_ready_error_mentions_smaller_chunks():
+    detail = _friendly_runtime_error_detail(
+        RuntimeError("CUDA driver error: device not ready")
+    )
+
+    assert "PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE" in detail
+    assert "120" in detail
+
+
 def test_translations_return_501(client):
     response = client.post("/v1/audio/translations")
     assert response.status_code == 501

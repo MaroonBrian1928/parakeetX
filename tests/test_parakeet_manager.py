@@ -27,12 +27,7 @@ def test_chunk_seconds_for_available_gib_thresholds() -> None:
     assert _chunk_seconds_for_available_gib(3.0) == 300
     assert _chunk_seconds_for_available_gib(4.5) == 450
     assert _chunk_seconds_for_available_gib(6.0) == 600
-    assert _chunk_seconds_for_available_gib(7.5) == 750
-    assert _chunk_seconds_for_available_gib(9.0) == 900
-    assert _chunk_seconds_for_available_gib(10.5) == 1050
-    assert _chunk_seconds_for_available_gib(12.0) == 1200
-    assert _chunk_seconds_for_available_gib(13.5) == 1350
-    assert _chunk_seconds_for_available_gib(24.0) == 2400
+    assert _chunk_seconds_for_available_gib(24.0) == 600
 
 
 def test_resolve_chunk_seconds_uses_available_cuda_memory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -54,6 +49,27 @@ def test_resolve_chunk_seconds_uses_available_cuda_memory(monkeypatch: pytest.Mo
     )
 
     assert manager._resolve_chunk_seconds(audio_path) == 450
+
+
+def test_resolve_chunk_seconds_default_cap_keeps_modern_cuda_chunks_conservative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "audio.wav"
+    _write_silent_wav(audio_path, duration_seconds=1558.0)
+
+    settings = ParakeetSettings(
+        device="cuda",
+        cuda_adaptive_chunking=True,
+    )
+    manager = ParakeetModelManager(settings)
+    monkeypatch.setattr(
+        manager,
+        "_cuda_memory_snapshot",
+        lambda: (9.92, 15.92, "NVIDIA GeForce RTX 5070 Ti"),
+    )
+
+    assert manager._resolve_chunk_seconds(audio_path) == 600
 
 
 def test_transcribe_chunked_merges_offsets(tmp_path: Path) -> None:

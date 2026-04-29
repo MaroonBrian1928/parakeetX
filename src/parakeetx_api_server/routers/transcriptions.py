@@ -33,6 +33,14 @@ def _friendly_runtime_error_detail(exc: RuntimeError) -> str:
             "or set `PARAKEET__DEVICE_CUDA=cpu` (and optionally `DIARIZATION__DEVICE_CUDA=cpu`)."
         )
 
+    if "device not ready" in lowered:
+        return (
+            f"{detail} "
+            "Hint: the GPU stopped responding during inference. Try a smaller "
+            "`PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE` such as `120`, or lower "
+            "`PARAKEET__CUDA_CHUNK_MAX_SECONDS`."
+        )
+
     if (
         "invalid ptx" in lowered
         or "cuda error: invalid argument" in lowered

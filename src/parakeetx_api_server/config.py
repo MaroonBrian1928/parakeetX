@@ -28,7 +28,7 @@ class ParakeetSettings(BaseModel):
     cuda_adaptive_chunking: bool = True
     cuda_chunk_seconds_override: int | None = Field(default=None, ge=1)
     cuda_chunk_min_seconds: int = Field(default=30, ge=1)
-    cuda_chunk_max_seconds: int = Field(default=1200, ge=1)
+    cuda_chunk_max_seconds: int = Field(default=600, ge=1)
     cuda_chunk_overlap_seconds: float = Field(default=0.0, ge=0.0, le=10.0)
 
     @field_validator("*", mode="before")
