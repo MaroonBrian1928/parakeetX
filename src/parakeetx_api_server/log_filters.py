@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import logging
+import warnings
 
 _SUPPRESSED_MESSAGE_FRAGMENTS = (
     "You are using a non-tarred dataset and requested tokenization during data sampling",
     "The following configuration keys are ignored by Lhotse dataloader: use_start_end_token",
     "If you intend to do training, please call the ModelPT.setup_training_data()",
+    "If you intend to do training or fine-tuning, please call the ModelPT.setup_training_data()",
     "If you intend to do validation, please call the ModelPT.setup_validation_data()",
+    "Timestamps requested, setting decoding timestamps to True",
+    "Using RNNT Loss : tdt",
+    "Loss tdt_kwargs:",
+    "TensorFloat-32 (TF32) has been disabled",
 )
 
 
@@ -21,11 +27,17 @@ _filter = _MessageFragmentFilter()
 
 def install_noisy_dependency_log_filters() -> None:
     """Hide known noisy dependency warnings without muting unrelated warnings."""
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*TensorFloat-32 \(TF32\) has been disabled.*",
+    )
+
     candidate_loggers = (
         logging.getLogger(),
         logging.getLogger("nemo"),
         logging.getLogger("nemo_logger"),
         logging.getLogger("NeMo"),
+        logging.getLogger("pyannote"),
         logging.getLogger("uvicorn.error"),
     )
 

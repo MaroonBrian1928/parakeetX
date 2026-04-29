@@ -172,7 +172,7 @@ class ParakeetModelManager:
                 "chunk_seconds": None,
                 "reason": "non_cuda_device",
                 "duration_seconds": _audio_duration_seconds(audio_path),
-                "gpu_profile": "non_cuda",
+                "chunk_policy": "non_cuda",
                 "gpu_name": None,
                 "free_gib": None,
                 "total_gib": None,
@@ -182,7 +182,7 @@ class ParakeetModelManager:
                 "chunk_seconds": None,
                 "reason": "adaptive_chunking_disabled",
                 "duration_seconds": _audio_duration_seconds(audio_path),
-                "gpu_profile": "disabled",
+                "chunk_policy": "disabled",
                 "gpu_name": None,
                 "free_gib": None,
                 "total_gib": None,
@@ -201,7 +201,7 @@ class ParakeetModelManager:
                 "chunk_seconds": max(1, int(chunk_seconds)),
                 "reason": "override",
                 "duration_seconds": duration_seconds,
-                "gpu_profile": "override",
+                "chunk_policy": "override",
                 "gpu_name": None,
                 "free_gib": None,
                 "total_gib": None,
@@ -213,14 +213,13 @@ class ParakeetModelManager:
                 "chunk_seconds": None,
                 "reason": "memory_probe_failed",
                 "duration_seconds": duration_seconds,
-                "gpu_profile": "unknown",
+                "chunk_policy": "unknown",
                 "gpu_name": gpu_name,
                 "free_gib": None,
                 "total_gib": total_gib,
             }
 
-        profile = _gpu_chunk_profile(gpu_name, total_gib)
-        chunk_seconds = _chunk_seconds_for_gpu_profile(available_gib, profile=profile)
+        chunk_seconds = _chunk_seconds_for_available_gib(available_gib)
         chunk_seconds = max(self._settings.cuda_chunk_min_seconds, chunk_seconds)
         chunk_seconds = min(self._settings.cuda_chunk_max_seconds, chunk_seconds)
 
@@ -231,7 +230,7 @@ class ParakeetModelManager:
                     "chunk_seconds": None,
                     "reason": "audio_shorter_than_chunk",
                     "duration_seconds": duration_seconds,
-                    "gpu_profile": profile,
+                    "chunk_policy": "memory_only",
                     "gpu_name": gpu_name,
                     "free_gib": available_gib,
                     "total_gib": total_gib,
@@ -241,7 +240,7 @@ class ParakeetModelManager:
             "chunk_seconds": max(1, int(chunk_seconds)),
             "reason": "adaptive",
             "duration_seconds": duration_seconds,
-            "gpu_profile": profile,
+            "chunk_policy": "memory_only",
             "gpu_name": gpu_name,
             "free_gib": available_gib,
             "total_gib": total_gib,
@@ -250,13 +249,13 @@ class ParakeetModelManager:
     def _log_chunk_plan(self, audio_path: Path, plan: dict[str, Any]) -> None:
         message = (
             "ASR request chunk plan: file=%s duration=%.2fs device=%s gpu=%s "
-            "profile=%s free_gib=%s total_gib=%s chunk_seconds=%s reason=%s"
+            "policy=%s free_gib=%s total_gib=%s chunk_seconds=%s reason=%s"
         ) % (
             audio_path.name,
             float(plan.get("duration_seconds") or 0.0),
             self._settings.device,
             plan.get("gpu_name") or "unknown",
-            plan.get("gpu_profile") or "unknown",
+            plan.get("chunk_policy") or "unknown",
             _fmt_gib(plan.get("free_gib")),
             _fmt_gib(plan.get("total_gib")),
             plan.get("chunk_seconds"),
@@ -515,58 +514,38 @@ def _get_field(item: Any, *names: str, default: Any = None) -> Any:
 
 def _chunk_seconds_for_available_gib(available_gib: float) -> int:
     if available_gib >= 24.0:
+        return 2400
+    if available_gib >= 22.5:
+        return 2250
+    if available_gib >= 21.0:
+        return 2100
+    if available_gib >= 19.5:
+        return 1950
+    if available_gib >= 18.0:
+        return 1800
+    if available_gib >= 16.5:
+        return 1650
+    if available_gib >= 15.0:
+        return 1500
+    if available_gib >= 13.5:
+        return 1350
+    if available_gib >= 12.0:
         return 1200
-    if available_gib >= 16.0:
+    if available_gib >= 10.5:
+        return 1050
+    if available_gib >= 9.0:
         return 900
-    if available_gib >= 10.0:
-        return 600
+    if available_gib >= 7.5:
+        return 750
     if available_gib >= 6.0:
-        return 360
+        return 600
+    if available_gib >= 4.5:
+        return 450
     if available_gib >= 3.0:
-        return 120
-    return 30
-
-
-def _chunk_seconds_for_gpu_profile(available_gib: float, *, profile: str) -> int:
-    if profile == "legacy_titan":
-        if available_gib >= 10.0:
-            return 1080
-        if available_gib >= 8.0:
-            return 900
-        if available_gib >= 6.0:
-            return 720
-        if available_gib >= 3.0:
-            return 180
-        return 90
-
-    if profile == "modern_high_end":
-        if available_gib >= 24.0:
-            return 1200
-        if available_gib >= 16.0:
-            return 900
-        if available_gib >= 10.0:
-            return 600
-        if available_gib >= 6.0:
-            return 420
-        if available_gib >= 3.0:
-            return 180
-        return 90
-
-    return _chunk_seconds_for_available_gib(available_gib)
-
-
-def _gpu_chunk_profile(gpu_name: str | None, total_gib: float | None) -> str:
-    name = (gpu_name or "").lower()
-    titan_markers = ("titan x", "titan xp", "gtx titan", "maxwell")
-    modern_markers = ("rtx 4090", "rtx 6000 ada", "a100", "h100", "l40", "l4")
-
-    if any(marker in name for marker in titan_markers):
-        return "legacy_titan"
-    if any(marker in name for marker in modern_markers):
-        return "modern_high_end"
-    if total_gib is not None and total_gib >= 40.0:
-        return "modern_high_end"
-    return "default"
+        return 300
+    if available_gib >= 1.5:
+        return 150
+    return 90
 
 
 def _audio_duration_seconds(audio_path: Path) -> float:

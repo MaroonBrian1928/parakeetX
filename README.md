@@ -127,7 +127,7 @@ Subtitle formats (`srt` / `vtt`) prefix cues with speaker labels when available.
 
 CUDA unload attempts `torch.cuda.empty_cache()`.
 When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
-Adaptive chunking includes GPU profiles (for example, conservative chunking on TITAN-era cards and larger chunks on newer high-end GPUs), and each request logs its chosen chunk plan at transcription start.
+Adaptive chunking uses one memory-based ladder in 1.5 GiB steps and logs the chosen chunk plan at transcription start.
 Maxwell/TITAN-era CUDA runs switch NeMo decoding from `greedy_batch` to `greedy` to avoid CUDA graph decoder compatibility failures while keeping ASR on GPU.
 
 ## Environment Variables

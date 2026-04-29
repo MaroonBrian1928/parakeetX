@@ -12,8 +12,6 @@ from parakeetx_api_server.config import ParakeetSettings
 from parakeetx_api_server.model_managers.parakeet_manager import (
     ParakeetModelManager,
     _chunk_seconds_for_available_gib,
-    _chunk_seconds_for_gpu_profile,
-    _gpu_chunk_profile,
 )
 
 
@@ -24,27 +22,17 @@ def _write_silent_wav(path: Path, *, duration_seconds: float, sample_rate: int =
 
 
 def test_chunk_seconds_for_available_gib_thresholds() -> None:
-    assert _chunk_seconds_for_available_gib(2.9) == 30
-    assert _chunk_seconds_for_available_gib(3.0) == 120
-    assert _chunk_seconds_for_available_gib(6.0) == 360
-    assert _chunk_seconds_for_available_gib(10.0) == 600
-    assert _chunk_seconds_for_available_gib(16.0) == 900
-    assert _chunk_seconds_for_available_gib(24.0) == 1200
-
-
-def test_chunk_seconds_for_legacy_titan_profile() -> None:
-    assert _chunk_seconds_for_gpu_profile(2.9, profile="legacy_titan") == 90
-    assert _chunk_seconds_for_gpu_profile(3.0, profile="legacy_titan") == 180
-    assert _chunk_seconds_for_gpu_profile(6.0, profile="legacy_titan") == 720
-    assert _chunk_seconds_for_gpu_profile(8.0, profile="legacy_titan") == 900
-    assert _chunk_seconds_for_gpu_profile(10.0, profile="legacy_titan") == 1080
-
-
-def test_gpu_chunk_profile_detection() -> None:
-    assert _gpu_chunk_profile("NVIDIA GeForce GTX TITAN X", 12.0) == "legacy_titan"
-    assert _gpu_chunk_profile("NVIDIA H100 PCIe", 80.0) == "modern_high_end"
-    assert _gpu_chunk_profile("Unknown GPU", 48.0) == "modern_high_end"
-    assert _gpu_chunk_profile("NVIDIA RTX 3070", 8.0) == "default"
+    assert _chunk_seconds_for_available_gib(1.4) == 90
+    assert _chunk_seconds_for_available_gib(1.5) == 150
+    assert _chunk_seconds_for_available_gib(3.0) == 300
+    assert _chunk_seconds_for_available_gib(4.5) == 450
+    assert _chunk_seconds_for_available_gib(6.0) == 600
+    assert _chunk_seconds_for_available_gib(7.5) == 750
+    assert _chunk_seconds_for_available_gib(9.0) == 900
+    assert _chunk_seconds_for_available_gib(10.5) == 1050
+    assert _chunk_seconds_for_available_gib(12.0) == 1200
+    assert _chunk_seconds_for_available_gib(13.5) == 1350
+    assert _chunk_seconds_for_available_gib(24.0) == 2400
 
 
 def test_resolve_chunk_seconds_uses_available_cuda_memory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -65,7 +53,7 @@ def test_resolve_chunk_seconds_uses_available_cuda_memory(monkeypatch: pytest.Mo
         lambda: (5.5, 12.0, "NVIDIA GeForce GTX TITAN X"),
     )
 
-    assert manager._resolve_chunk_seconds(audio_path) == 180
+    assert manager._resolve_chunk_seconds(audio_path) == 450
 
 
 def test_transcribe_chunked_merges_offsets(tmp_path: Path) -> None:
@@ -207,7 +195,7 @@ def test_log_chunk_plan_emits_one_line(caplog: pytest.LogCaptureFixture, tmp_pat
             "chunk_seconds": 60,
             "reason": "adaptive",
             "duration_seconds": 30.0,
-            "gpu_profile": "default",
+            "chunk_policy": "default",
             "gpu_name": "NVIDIA RTX 3070",
             "free_gib": 7.2,
             "total_gib": 8.0,
