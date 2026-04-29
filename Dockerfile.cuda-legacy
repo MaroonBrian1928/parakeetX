@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -8,9 +8,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_PYTHON=3.12 \
     UV_PYTHON_PREFERENCE=managed
 
-ARG TORCH_VERSION=2.10.0
-ARG TORCHAUDIO_VERSION=2.10.0
-ARG PYTORCH_CUDA_FLAVOR=cu128
+ARG TORCH_VERSION=2.5.1
+ARG TORCHAUDIO_VERSION=2.5.1
+ARG PYTORCH_CUDA_FLAVOR=cu118
 ARG UV_TORCH_INSTALL_FLAGS=
 
 WORKDIR /app
@@ -28,8 +28,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     --no-install-package torch \
     --no-install-package torchaudio
 
-# Override lockfile's torch stack with an explicit PyTorch CUDA wheel set.
-# The default cu128 wheels support newer Blackwell / RTX 50-series GPUs.
+# Legacy CUDA build for Maxwell/Pascal-era GPUs that are not covered by newer cu128 wheels.
 # GitHub Actions can set UV_TORCH_INSTALL_FLAGS=--no-cache to reduce peak disk use.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install ${UV_TORCH_INSTALL_FLAGS} --python /app/.venv/bin/python \
@@ -37,7 +36,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}"
 
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \

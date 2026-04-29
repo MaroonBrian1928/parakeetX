@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     model_idle_evict_minutes: float | None = Field(default=None, ge=0)
 
     uvicorn_host: str = "0.0.0.0"
-    uvicorn_port: int = 7317
+    uvicorn_port: int = 7474
 
     @field_validator("*", mode="before")
     @classmethod

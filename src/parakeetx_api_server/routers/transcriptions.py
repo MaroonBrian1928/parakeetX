@@ -33,10 +33,15 @@ def _friendly_runtime_error_detail(exc: RuntimeError) -> str:
             "or set `PARAKEET__DEVICE_CUDA=cpu` (and optionally `DIARIZATION__DEVICE_CUDA=cpu`)."
         )
 
-    if "invalid ptx" in lowered or "cuda error: invalid argument" in lowered:
+    if (
+        "invalid ptx" in lowered
+        or "cuda error: invalid argument" in lowered
+        or "no kernel image is available" in lowered
+    ):
         return (
             f"{detail} "
-            "Hint: this GPU/runtime combo is incompatible with the current CUDA decoder path. "
+            "Hint: this GPU/runtime combo is incompatible with the current CUDA path. "
+            "On RTX 50-series / Blackwell GPUs, rebuild or pull an image with PyTorch CUDA 12.8+ wheels. "
             "Set `PARAKEET__DEVICE_CUDA=cpu` (and optionally `DIARIZATION__DEVICE_CUDA=cpu`) "
             "to run reliably on this host."
         )

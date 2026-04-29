@@ -31,6 +31,11 @@ jobs:
             cache-mode: min
             build-args: |
               UV_TORCH_INSTALL_FLAGS=--no-cache
+          - variant: cuda-legacy
+            dockerfile: Dockerfile.cuda-legacy
+            cache-mode: min
+            build-args: |
+              UV_TORCH_INSTALL_FLAGS=--no-cache
 
     steps:
       - name: Check out repository
@@ -44,7 +49,7 @@ jobs:
           echo "name=${REGISTRY}/${image_name}" >> "${GITHUB_OUTPUT}"
 
       - name: Free disk space for CUDA image build
-        if: matrix.variant == 'cuda'
+        if: startsWith(matrix.variant, 'cuda')
         shell: bash
         run: |
           df -h

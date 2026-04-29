@@ -40,7 +40,7 @@ mise run test
 mise run serve
 ```
 
-Server default: `http://0.0.0.0:7317`
+Server default: `http://0.0.0.0:7474`
 
 If `API_KEY` is set, authenticated endpoints require a bearer token:
 
@@ -129,6 +129,7 @@ CUDA unload attempts `torch.cuda.empty_cache()`.
 When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
 Adaptive chunking uses one memory-based ladder in 1.5 GiB steps and logs the chosen chunk plan at transcription start.
 Maxwell/TITAN-era CUDA runs switch NeMo decoding from `greedy_batch` to `greedy` to avoid CUDA graph decoder compatibility failures while keeping ASR on GPU.
+The default CUDA Docker image uses a CUDA 12.8 runtime and PyTorch CUDA 12.8 wheels so RTX 50-series / Blackwell GPUs can run kernels for their newer compute capability.
 
 ## Environment Variables
 
@@ -166,6 +167,12 @@ These are skipped by default in normal local tests.
 
 ## Docker
 
+Published image tags:
+
+- `ghcr.io/maroonbrian1928/parakeetx:cpu`: CPU-only runtime.
+- `ghcr.io/maroonbrian1928/parakeetx:cuda`: CUDA 12.8 / PyTorch cu128 runtime for RTX 50-series / Blackwell and newer supported CUDA GPUs.
+- `ghcr.io/maroonbrian1928/parakeetx:cuda-legacy`: CUDA 12.4 / PyTorch cu118 runtime for older GPUs such as TITAN X / Maxwell that are not covered by newer PyTorch cu128 wheels.
+
 Build CPU image:
 
 ```bash
@@ -176,6 +183,12 @@ Build CUDA image:
 
 ```bash
 docker compose -f compose.yaml build
+```
+
+Build legacy CUDA image:
+
+```bash
+docker compose -f compose.cuda-legacy.yaml build
 ```
 
 Run CPU profile:
@@ -190,10 +203,15 @@ Run CUDA profile:
 docker compose -f compose.yaml up
 ```
 
-Default host ports:
+Run legacy CUDA profile:
 
-- CPU profile: `7474`
-- CUDA profile: `7373`
+```bash
+docker compose -f compose.cuda-legacy.yaml up
+```
+
+Default host port: `7474`.
+
+All Compose profiles use `HOST_PORT`. Only one profile can bind the default host port at a time. Override `HOST_PORT` when starting a second profile if you need multiple profiles running simultaneously.
 
 CUDA profile defaults are tuned for lower VRAM pressure:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from parakeetx_api_server.deps import get_transcription_service
 from parakeetx_api_server.main import app
+from parakeetx_api_server.routers.transcriptions import _friendly_runtime_error_detail
 
 
 class FakeTranscriptionService:
@@ -100,6 +101,14 @@ def test_unsupported_feature_failures(client, wav_bytes):
 
     hotwords_response = _post_transcription(client, wav_bytes, hotwords="hello")
     assert hotwords_response.status_code == 422
+
+
+def test_cuda_kernel_image_error_mentions_blackwell_image_rebuild():
+    detail = _friendly_runtime_error_detail(
+        RuntimeError("CUDA error: no kernel image is available for execution on the device")
+    )
+
+    assert "PyTorch CUDA 12.8+ wheels" in detail
 
 
 def test_translations_return_501(client):

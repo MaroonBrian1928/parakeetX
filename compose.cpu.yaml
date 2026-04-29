@@ -10,4 +10,4 @@ services:
       PARAKEET__DEVICE: cpu
       DIARIZATION__DEVICE: cpu
     ports:
-      - "${HOST_PORT_CPU:-7474}:${UVICORN_PORT:-7317}"
+      - "${HOST_PORT:-7474}:${UVICORN_PORT:-7474}"
