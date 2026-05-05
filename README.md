@@ -5,15 +5,16 @@ Standalone FastAPI transcription service inspired by WhisperX API conventions, b
 ## Features
 
 - `POST /v1/audio/transcriptions` with OpenAI-style multipart fields.
-- Native Parakeet timestamps (no Whisper forced-alignment stage).
+- Native Parakeet timestamps, with optional Qwen3 forced alignment.
 - WhisperX-compatible word timestamp fields for downstream tools (`word_segments` and `segments[].words`).
 - Optional Silero VAD (`vad_filter=true`) that transcribes speech-only chunks with WhisperX-style VAD knobs.
+- Optional forced alignment (`forced_alignment=true` or `FORCED_ALIGNMENT__ENABLED=true`): `FORCED_ALIGNMENT__METHOD=parakeet` keeps Parakeet word timings, while `FORCED_ALIGNMENT__METHOD=qwen` refines word timings with `Qwen/Qwen3-ForcedAligner-0.6B`.
 - Optional diarization via `pyannote/speaker-diarization-community-1` (`diarize=true`).
 - Speaker labels assigned to words/segments by maximum timestamp overlap.
 - `GET /health` readiness check.
 - Explicit unsupported-feature behavior:
   - `/v1/audio/translations` returns `501`.
-  - Non-English language, streaming, prompt biasing, temperature sampling, hotwords, and forced-alignment return `422`.
+  - Non-English language, streaming, prompt biasing, temperature sampling, and hotwords return `422`.
 
 ## Quickstart
 
@@ -146,6 +147,7 @@ Set `UNLOAD_ASR_BEFORE_DIARIZATION=true` only if you want lower ASR/diarization 
 When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
 Adaptive chunking uses a conservative memory-based ladder, caps chunks at 600 seconds by default, and logs the chosen chunk plan at transcription start.
 Set `VAD__ENABLED=true` or pass `vad_filter=true` per request to run Silero VAD before ASR. VAD cuts the normalized audio into speech-only chunks, transcribes those chunks, then offsets word and segment timestamps back to the original timeline. Silero loads through ONNX Runtime by default (`VAD__USE_ONNX=true`) and can fall back to JIT if ONNX Runtime is unavailable or incompatible. `chunk_size`, `vad_onset`, and `vad_offset` follow the same shape as WhisperX's VAD controls.
+Pass `forced_alignment=true` or set `FORCED_ALIGNMENT__ENABLED=true` to enable the configured alignment method for every request. `FORCED_ALIGNMENT__METHOD=parakeet` uses native Parakeet word timestamps. Set `FORCED_ALIGNMENT__METHOD=qwen` to run `Qwen/Qwen3-ForcedAligner-0.6B` through `qwen-asr`; install it with `uv sync --extra forced-alignment`. For CUDA, use values such as `FORCED_ALIGNMENT__DEVICE=cuda:0` and `FORCED_ALIGNMENT__DTYPE=bfloat16`. Qwen alignment runs against coalesced ASR segment windows; lower `FORCED_ALIGNMENT__MAX_CHUNK_SECONDS` if alignment still runs out of GPU memory.
 If CUDA reports `device not ready`, lower `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE` to a value such as `120` or reduce `PARAKEET__CUDA_CHUNK_MAX_SECONDS`.
 Set `PARAKEET__CUDA_FORCE_GREEDY_DECODING=true` to switch NeMo decoding from `greedy_batch` to `greedy` if a Maxwell/TITAN-era CUDA runtime hits decoder compatibility failures.
 The default CUDA Docker image uses a CUDA 12.8 runtime and PyTorch CUDA 12.8 wheels so RTX 50-series / Blackwell GPUs can run kernels for their newer compute capability.
@@ -184,6 +186,14 @@ Core env vars:
 - `VAD__MIN_SPEECH_DURATION_MS`
 - `VAD__MIN_SILENCE_DURATION_MS`
 - `VAD__SPEECH_PAD_MS`
+- `FORCED_ALIGNMENT__ENABLED`
+- `FORCED_ALIGNMENT__METHOD`
+- `FORCED_ALIGNMENT__MODEL_NAME`
+- `FORCED_ALIGNMENT__DEVICE`
+- `FORCED_ALIGNMENT__DTYPE`
+- `FORCED_ALIGNMENT__ATTN_IMPLEMENTATION`
+- `FORCED_ALIGNMENT__MAX_CHUNK_SECONDS`
+- `FORCED_ALIGNMENT__PRELOAD_MODEL`
 - `MAX_CONCURRENT_TRANSCRIPTIONS`
 - `DEBUG_LOG_TRANSCRIPTION_PAYLOAD`
 - `MODEL_IDLE_EVICT_MINUTES`

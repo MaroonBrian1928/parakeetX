@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import UploadFile
 
 from ..model_managers.diarization_manager import DiarizationModelManager
+from ..model_managers.forced_alignment_manager import ForcedAlignmentModelManager
 from ..model_managers.parakeet_manager import ParakeetModelManager
 from ..model_managers.vad_manager import VadModelManager, VadOptions
 from ..memory import release_memory_to_os
@@ -26,12 +27,14 @@ class TranscriptionService:
         parakeet_manager: ParakeetModelManager,
         diarization_manager: DiarizationModelManager,
         vad_manager: VadModelManager,
+        forced_alignment_manager: ForcedAlignmentModelManager,
         max_concurrency: int,
         unload_asr_before_diarization: bool = False,
     ) -> None:
         self._parakeet_manager = parakeet_manager
         self._diarization_manager = diarization_manager
         self._vad_manager = vad_manager
+        self._forced_alignment_manager = forced_alignment_manager
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
         self._unload_asr_before_diarization = unload_asr_before_diarization
 
@@ -49,6 +52,7 @@ class TranscriptionService:
         max_speakers: int | None,
         num_speakers: int | None,
         vad_options: VadOptions,
+        forced_alignment: bool,
     ) -> dict[str, Any]:
         request_started = time.perf_counter()
         suffix = Path(upload.filename or "upload.wav").suffix or ".wav"
@@ -127,6 +131,39 @@ class TranscriptionService:
                             f"segments={len(asr_payload.get('segments', []))}"
                         ),
                     )
+
+                    if (
+                        forced_alignment
+                        and self._forced_alignment_manager.settings.method == "qwen"
+                    ):
+                        stage_started = time.perf_counter()
+                        aligned_words = await asyncio.to_thread(
+                            self._forced_alignment_manager.align_segments,
+                            normalized_path,
+                            segments=list(asr_payload.get("segments", [])),
+                            language=language or asr_payload.get("language"),
+                        )
+                        if aligned_words:
+                            asr_payload["words"] = aligned_words
+                        _emit_stage_timing(
+                            "forced_alignment",
+                            stage_started,
+                            request_started=request_started,
+                            extra=(
+                                "method=qwen "
+                                f"words={len(asr_payload.get('words', []))}"
+                            ),
+                        )
+                    elif forced_alignment:
+                        _emit_stage_timing(
+                            "forced_alignment",
+                            time.perf_counter(),
+                            request_started=request_started,
+                            extra=(
+                                "method=parakeet "
+                                f"words={len(asr_payload.get('words', []))}"
+                            ),
+                        )
 
                     diarization_segments: list[dict[str, Any]] = []
                     if diarize:

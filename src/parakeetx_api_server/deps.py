@@ -4,6 +4,7 @@ from functools import lru_cache
 
 from .config import Settings, get_settings
 from .model_managers.diarization_manager import DiarizationModelManager
+from .model_managers.forced_alignment_manager import ForcedAlignmentModelManager
 from .model_managers.model_worker import ModelWorkerClient
 from .model_managers.parakeet_manager import ParakeetModelManager
 from .model_managers.vad_manager import VadModelManager
@@ -46,12 +47,19 @@ def get_vad_manager() -> VadModelManager:
 
 
 @lru_cache
+def get_forced_alignment_manager() -> ForcedAlignmentModelManager:
+    settings = get_settings()
+    return ForcedAlignmentModelManager(settings.forced_alignment)
+
+
+@lru_cache
 def get_transcription_service() -> TranscriptionService:
     settings: Settings = get_settings()
     return TranscriptionService(
         parakeet_manager=get_parakeet_manager(),
         diarization_manager=get_diarization_manager(),
         vad_manager=get_vad_manager(),
+        forced_alignment_manager=get_forced_alignment_manager(),
         max_concurrency=settings.max_concurrent_transcriptions,
         unload_asr_before_diarization=settings.unload_asr_before_diarization,
     )

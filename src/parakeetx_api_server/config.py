@@ -87,6 +87,45 @@ class VadSettings(BaseModel):
         return normalized
 
 
+class ForcedAlignmentSettings(BaseModel):
+    enabled: bool = False
+    method: str = "parakeet"
+    model_name: str = "Qwen/Qwen3-ForcedAligner-0.6B"
+    device: str = "cpu"
+    dtype: str = "float32"
+    attn_implementation: str | None = None
+    max_chunk_seconds: float = Field(default=30.0, gt=0.0)
+    preload_model: bool = False
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _strip_string_values(cls, value: object) -> object:
+        return _strip_env_string(value)
+
+    @field_validator("attn_implementation", mode="before")
+    @classmethod
+    def _empty_attn_implementation_as_none(cls, value: object) -> object:
+        return _none_if_blank_env(value)
+
+    @field_validator("dtype")
+    @classmethod
+    def _validate_dtype(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        allowed = {"float32", "float16", "bfloat16"}
+        if normalized not in allowed:
+            raise ValueError("forced alignment dtype must be float32, float16, or bfloat16")
+        return normalized
+
+    @field_validator("method")
+    @classmethod
+    def _validate_method(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        allowed = {"parakeet", "qwen"}
+        if normalized not in allowed:
+            raise ValueError("forced alignment method must be parakeet or qwen")
+        return normalized
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -100,6 +139,7 @@ class Settings(BaseSettings):
     parakeet: ParakeetSettings = Field(default_factory=ParakeetSettings)
     diarization: DiarizationSettings = Field(default_factory=DiarizationSettings)
     vad: VadSettings = Field(default_factory=VadSettings)
+    forced_alignment: ForcedAlignmentSettings = Field(default_factory=ForcedAlignmentSettings)
 
     max_concurrent_transcriptions: int = 2
     debug_log_transcription_payload: bool = False

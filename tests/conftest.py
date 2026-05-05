@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from parakeetx_api_server.deps import (
     get_diarization_manager,
+    get_forced_alignment_manager,
     get_model_worker_client,
     get_parakeet_manager,
     get_transcription_service,
@@ -47,6 +48,14 @@ def clear_dependency_caches(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VAD__MIN_SPEECH_DURATION_MS", raising=False)
     monkeypatch.delenv("VAD__MIN_SILENCE_DURATION_MS", raising=False)
     monkeypatch.delenv("VAD__SPEECH_PAD_MS", raising=False)
+    monkeypatch.delenv("FORCED_ALIGNMENT__ENABLED", raising=False)
+    monkeypatch.delenv("FORCED_ALIGNMENT__METHOD", raising=False)
+    monkeypatch.delenv("FORCED_ALIGNMENT__MODEL_NAME", raising=False)
+    monkeypatch.delenv("FORCED_ALIGNMENT__DEVICE", raising=False)
+    monkeypatch.delenv("FORCED_ALIGNMENT__DTYPE", raising=False)
+    monkeypatch.delenv("FORCED_ALIGNMENT__ATTN_IMPLEMENTATION", raising=False)
+    monkeypatch.delenv("FORCED_ALIGNMENT__MAX_CHUNK_SECONDS", raising=False)
+    monkeypatch.delenv("FORCED_ALIGNMENT__PRELOAD_MODEL", raising=False)
     monkeypatch.delenv("MAX_CONCURRENT_TRANSCRIPTIONS", raising=False)
     monkeypatch.delenv("MODEL_IDLE_EVICT_MINUTES", raising=False)
     monkeypatch.delenv("MODEL_PROCESS_ISOLATION", raising=False)
@@ -58,6 +67,7 @@ def clear_dependency_caches(monkeypatch: pytest.MonkeyPatch):
     get_model_worker_client.cache_clear()
     get_parakeet_manager.cache_clear()
     get_diarization_manager.cache_clear()
+    get_forced_alignment_manager.cache_clear()
     get_transcription_service.cache_clear()
     app.dependency_overrides.clear()
     yield

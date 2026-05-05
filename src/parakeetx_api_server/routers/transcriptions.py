@@ -207,12 +207,6 @@ async def create_transcription(
             detail="Hotwords are not supported.",
         )
 
-    if forced_alignment:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Forced alignment is not supported.",
-        )
-
     try:
         vad_options = VadOptions.from_settings(
             settings.vad,
@@ -242,6 +236,7 @@ async def create_transcription(
             max_speakers=max_speakers,
             num_speakers=num_speakers,
             vad_options=vad_options,
+            forced_alignment=settings.forced_alignment.enabled or forced_alignment,
         )
         _emit_route_timing("route_service", stage_started, route_started=route_started)
     except ValueError as exc:

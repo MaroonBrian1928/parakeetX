@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from .config import get_settings
 from .deps import (
     get_diarization_manager,
+    get_forced_alignment_manager,
     get_model_worker_client,
     get_parakeet_manager,
     get_vad_manager,
@@ -76,6 +77,10 @@ async def startup() -> None:
     if settings.vad.preload_model:
         vad = get_vad_manager()
         await asyncio.to_thread(vad.load_model)
+
+    if settings.forced_alignment.preload_model and settings.forced_alignment.method == "qwen":
+        forced_alignment = get_forced_alignment_manager()
+        await asyncio.to_thread(forced_alignment.load_model)
 
 
 @app.on_event("shutdown")

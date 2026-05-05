@@ -24,7 +24,7 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    uv sync --frozen --no-dev --no-install-project --extra nemo --extra diarization --extra vad --extra cuda \
+    uv sync --frozen --no-dev --no-install-project --extra nemo --extra diarization --extra vad --extra forced-alignment --extra cuda \
     --no-install-package torch \
     --no-install-package torchaudio
 

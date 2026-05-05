@@ -21,6 +21,14 @@ def test_parses_nested_config(monkeypatch):
     monkeypatch.setenv("VAD__VAD_ONSET", "0.4")
     monkeypatch.setenv("VAD__VAD_OFFSET", "0.25")
     monkeypatch.setenv("VAD__CHUNK_SIZE", "20")
+    monkeypatch.setenv("FORCED_ALIGNMENT__ENABLED", "true")
+    monkeypatch.setenv("FORCED_ALIGNMENT__METHOD", " qwen ")
+    monkeypatch.setenv("FORCED_ALIGNMENT__MODEL_NAME", "Qwen/Qwen3-ForcedAligner-0.6B")
+    monkeypatch.setenv("FORCED_ALIGNMENT__DEVICE", "cuda:0")
+    monkeypatch.setenv("FORCED_ALIGNMENT__DTYPE", " bfloat16 ")
+    monkeypatch.setenv("FORCED_ALIGNMENT__ATTN_IMPLEMENTATION", "flash_attention_2")
+    monkeypatch.setenv("FORCED_ALIGNMENT__MAX_CHUNK_SECONDS", "20")
+    monkeypatch.setenv("FORCED_ALIGNMENT__PRELOAD_MODEL", "true")
     monkeypatch.setenv("MAX_CONCURRENT_TRANSCRIPTIONS", "7")
     monkeypatch.setenv("MODEL_IDLE_EVICT_MINUTES", "15")
     monkeypatch.setenv("MODEL_PROCESS_ISOLATION", "true")
@@ -43,6 +51,14 @@ def test_parses_nested_config(monkeypatch):
     assert settings.vad.vad_onset == 0.4
     assert settings.vad.vad_offset == 0.25
     assert settings.vad.chunk_size == 20
+    assert settings.forced_alignment.enabled is True
+    assert settings.forced_alignment.method == "qwen"
+    assert settings.forced_alignment.model_name == "Qwen/Qwen3-ForcedAligner-0.6B"
+    assert settings.forced_alignment.device == "cuda:0"
+    assert settings.forced_alignment.dtype == "bfloat16"
+    assert settings.forced_alignment.attn_implementation == "flash_attention_2"
+    assert settings.forced_alignment.max_chunk_seconds == 20
+    assert settings.forced_alignment.preload_model is True
     assert settings.max_concurrent_transcriptions == 7
     assert settings.model_idle_evict_minutes == 15
     assert settings.model_process_isolation is True

@@ -25,6 +25,9 @@ vad = [
   "onnxruntime>=1.19.0",
   "silero-vad>=6.2.0",
 ]
+forced-alignment = [
+  "qwen-asr>=0.0.6",
+]
 cuda = [
   "torch>=2.3.0",
 ]

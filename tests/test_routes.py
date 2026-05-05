@@ -16,6 +16,7 @@ class FakeTranscriptionService:
         max_speakers,
         num_speakers,
         vad_options,
+        forced_alignment,
     ):
         _ = upload
         _ = language
@@ -23,6 +24,7 @@ class FakeTranscriptionService:
         _ = max_speakers
         _ = num_speakers
         self.vad_options = vad_options
+        self.forced_alignment = forced_alignment
         diarization = (
             [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}] if diarize else []
         )
@@ -131,6 +133,27 @@ def test_vad_options_are_accepted(client, wav_bytes):
     assert fake_service.vad_options.min_speech_duration_ms == 100
     assert fake_service.vad_options.min_silence_duration_ms == 200
     assert fake_service.vad_options.speech_pad_ms == 50
+
+
+def test_forced_alignment_flag_is_accepted(client, wav_bytes):
+    fake_service = FakeTranscriptionService()
+    app.dependency_overrides[get_transcription_service] = lambda: fake_service
+
+    response = _post_transcription(client, wav_bytes, forced_alignment="true")
+
+    assert response.status_code == 200
+    assert fake_service.forced_alignment is True
+
+
+def test_global_forced_alignment_setting_is_accepted(client, wav_bytes, monkeypatch):
+    monkeypatch.setenv("FORCED_ALIGNMENT__ENABLED", "true")
+    fake_service = FakeTranscriptionService()
+    app.dependency_overrides[get_transcription_service] = lambda: fake_service
+
+    response = _post_transcription(client, wav_bytes)
+
+    assert response.status_code == 200
+    assert fake_service.forced_alignment is True
 
 
 def test_invalid_vad_method_is_rejected(client, wav_bytes):
