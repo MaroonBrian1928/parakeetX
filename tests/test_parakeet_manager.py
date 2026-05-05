@@ -11,6 +11,9 @@ import soundfile as sf
 from parakeetx_api_server.config import ParakeetSettings
 from parakeetx_api_server.model_managers.parakeet_manager import (
     ParakeetModelManager,
+    _build_save_restore_connector,
+    _ensure_extracted_nemo_cache,
+    _is_extracted_nemo_dir_complete,
     _chunk_seconds_for_available_gib,
 )
 
@@ -220,3 +223,91 @@ def test_log_chunk_plan_emits_one_line(caplog: pytest.LogCaptureFixture, tmp_pat
 
     assert "ASR request chunk plan" in caplog.text
     assert "chunk_seconds=60" in caplog.text
+
+
+def test_process_isolated_parakeet_manager_delegates_to_worker(tmp_path: Path) -> None:
+    audio_path = tmp_path / "audio.wav"
+    _write_silent_wav(audio_path, duration_seconds=1.0)
+
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.unloaded = False
+
+        def parakeet_status(self):
+            return {
+                "loaded": False,
+                "model_name": "nvidia/parakeet-tdt-0.6b-v2",
+                "device": "cuda",
+                "idle_evict_minutes": None,
+            }
+
+        def transcribe_parakeet(self, path, *, language):
+            assert path == audio_path
+            assert language is None
+            return {"text": "hello", "words": [], "segments": [], "language": "en"}
+
+        def unload_parakeet(self):
+            self.unloaded = True
+            return self.parakeet_status()
+
+    worker = FakeWorker()
+    manager = ParakeetModelManager(
+        ParakeetSettings(device="cuda"),
+        idle_evict_minutes=1,
+        worker_client=worker,
+    )
+
+    assert manager.transcribe(audio_path)["text"] == "hello"
+    assert manager.status()["idle_evict_minutes"] == 1
+    manager.unload_model()
+    assert worker.unloaded is True
+
+
+def test_ensure_extracted_nemo_cache_reuses_complete_directory(tmp_path: Path) -> None:
+    nemo_file = tmp_path / "model.nemo"
+    nemo_file.write_bytes(b"fake")
+    extracted = tmp_path / "model.nemo.extracted"
+    extracted.mkdir()
+    (extracted / "model_config.yaml").write_text("model: {}\n")
+    (extracted / "model_weights.ckpt").write_bytes(b"weights")
+
+    class FakeConnector:
+        called = False
+
+        @staticmethod
+        def _unpack_nemo_file(path2file: str, out_folder: str) -> str:
+            _ = path2file
+            _ = out_folder
+            FakeConnector.called = True
+            return out_folder
+
+    assert _ensure_extracted_nemo_cache(nemo_file, SaveRestoreConnector=FakeConnector) == extracted
+    assert FakeConnector.called is False
+
+
+def test_ensure_extracted_nemo_cache_extracts_when_missing(tmp_path: Path) -> None:
+    nemo_file = tmp_path / "model.nemo"
+    nemo_file.write_bytes(b"fake")
+
+    class FakeConnector:
+        @staticmethod
+        def _unpack_nemo_file(path2file: str, out_folder: str) -> str:
+            _ = path2file
+            out = Path(out_folder)
+            (out / "model_config.yaml").write_text("model: {}\n")
+            (out / "model_weights.ckpt").write_bytes(b"weights")
+            return out_folder
+
+    extracted = _ensure_extracted_nemo_cache(nemo_file, SaveRestoreConnector=FakeConnector)
+
+    assert extracted == tmp_path / "model.nemo.extracted"
+    assert _is_extracted_nemo_dir_complete(extracted)
+
+
+def test_build_save_restore_connector_can_disable_mmap() -> None:
+    class FakeConnector:
+        pass
+
+    connector = _build_save_restore_connector(FakeConnector, torch_load_mmap=False)
+
+    assert type(connector) is FakeConnector

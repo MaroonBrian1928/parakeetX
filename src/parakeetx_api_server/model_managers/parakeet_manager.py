@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 import tempfile
 import threading
@@ -12,7 +13,9 @@ import soundfile as sf
 
 from ..config import ParakeetSettings
 from ..log_filters import install_noisy_dependency_log_filters
+from ..memory import release_memory_to_os
 from .idle_eviction import IdleModelEvictor
+from .model_worker import ModelWorkerClient
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +33,17 @@ class ParakeetModelManager:
         settings: ParakeetSettings,
         *,
         idle_evict_minutes: float | None = None,
+        worker_client: ModelWorkerClient | None = None,
     ) -> None:
         self._settings = settings
         self._model: Any | None = None
+        self._worker_client = worker_client
+        self._worker_loaded = False
         self._lock = threading.Lock()
         self._idle_evictor = IdleModelEvictor(
             model_label="parakeet",
             idle_minutes=idle_evict_minutes,
-            is_loaded=lambda: self._model is not None,
+            is_loaded=self._is_loaded,
             unload=self.unload_model,
         )
 
@@ -46,6 +52,10 @@ class ParakeetModelManager:
         return self._settings.model_name
 
     def status(self) -> dict[str, Any]:
+        if self._worker_client is not None:
+            status = self._worker_client.parakeet_status()
+            status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
+            return status
         return {
             "loaded": self._model is not None,
             "model_name": self._settings.model_name,
@@ -54,21 +64,45 @@ class ParakeetModelManager:
         }
 
     def load_model(self) -> dict[str, Any]:
+        if self._worker_client is not None:
+            status = self._worker_client.load_parakeet()
+            self._worker_loaded = True
+            self._idle_evictor.note_loaded()
+            status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
+            return status
+
         with self._lock:
             if self._model is not None:
                 return self.status()
 
             try:
                 from nemo.collections.asr.models import ASRModel
+                from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
             except ImportError as exc:
                 raise RuntimeError(
                     "NeMo ASR dependencies are not installed. Install with `uv sync --extra nemo`."
                 ) from exc
             install_noisy_dependency_log_filters()
 
+            save_restore_connector = _build_save_restore_connector(
+                SaveRestoreConnector,
+                torch_load_mmap=self._settings.torch_load_mmap,
+            )
+            if self._settings.use_extracted_nemo_cache:
+                model_file = ASRModel.from_pretrained(
+                    self._settings.model_name,
+                    return_model_file=True,
+                )
+                extracted_dir = _ensure_extracted_nemo_cache(
+                    Path(model_file),
+                    SaveRestoreConnector=SaveRestoreConnector,
+                )
+                save_restore_connector.model_extracted_dir = str(extracted_dir)
+
             self._model = ASRModel.from_pretrained(
                 self._settings.model_name,
                 map_location=self._settings.device,
+                save_restore_connector=save_restore_connector,
             )
 
             self._configure_cuda_runtime(self._model)
@@ -119,6 +153,14 @@ class ParakeetModelManager:
             logger.warning("Unable to adjust RNNT decoding strategy for CUDA compatibility: %s", exc)
 
     def unload_model(self) -> dict[str, Any]:
+        if self._worker_client is not None:
+            self._worker_loaded = False
+            self._idle_evictor.cancel()
+            status = self._worker_client.unload_parakeet()
+            release_memory_to_os()
+            status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
+            return status
+
         with self._lock:
             self._model = None
             self._idle_evictor.cancel()
@@ -129,6 +171,7 @@ class ParakeetModelManager:
                     torch.cuda.empty_cache()
                 except Exception:
                     pass
+        release_memory_to_os()
         return self.status()
 
     def transcribe(
@@ -140,28 +183,48 @@ class ParakeetModelManager:
         if language and language.lower() not in {"en", "english"}:
             raise ValueError("Only English transcription is supported")
 
-        with self._idle_evictor.use():
-            model = self._model
-            if model is None:
-                self.load_model()
+        if self._worker_client is not None:
+            with self._idle_evictor.use():
+                result = self._worker_client.transcribe_parakeet(
+                    audio_path,
+                    language=language,
+                )
+                self._worker_loaded = True
+                return result
+
+        try:
+            with self._idle_evictor.use():
                 model = self._model
+                if model is None:
+                    self.load_model()
+                    model = self._model
 
-            if model is None:
-                raise RuntimeError("Parakeet model failed to load")
+                if model is None:
+                    raise RuntimeError("Parakeet model failed to load")
 
-            install_noisy_dependency_log_filters()
-            chunk_plan = self._resolve_chunk_plan(audio_path)
-            self._log_chunk_plan(audio_path, chunk_plan)
-            chunk_seconds = chunk_plan["chunk_seconds"]
-            if chunk_seconds is None:
-                raw = model.transcribe([str(audio_path)], timestamps=True)
-                return self._normalize_raw_result(raw)
+                install_noisy_dependency_log_filters()
+                chunk_plan = self._resolve_chunk_plan(audio_path)
+                self._log_chunk_plan(audio_path, chunk_plan)
+                chunk_seconds = chunk_plan["chunk_seconds"]
+                if chunk_seconds is None:
+                    raw = model.transcribe([str(audio_path)], timestamps=True)
+                    try:
+                        return self._normalize_raw_result(raw)
+                    finally:
+                        del raw
 
-            return self._transcribe_chunked(
-                model=model,
-                audio_path=audio_path,
-                chunk_seconds=chunk_seconds,
-            )
+                return self._transcribe_chunked(
+                    model=model,
+                    audio_path=audio_path,
+                    chunk_seconds=chunk_seconds,
+                )
+        finally:
+            release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
+
+    def _is_loaded(self) -> bool:
+        if self._worker_client is not None:
+            return self._worker_loaded
+        return self._model is not None
 
     def _resolve_chunk_seconds(self, audio_path: Path) -> int | None:
         return self._resolve_chunk_plan(audio_path)["chunk_seconds"]
@@ -332,9 +395,12 @@ class ParakeetModelManager:
                 )
 
                 raw_chunk = model.transcribe([str(chunk_path)], timestamps=True)
-                chunk_payload = self._normalize_raw_result(raw_chunk)
-                chunk_offset_seconds = float(start_frame) / float(sample_rate)
-                chunks.append((chunk_offset_seconds, chunk_payload))
+                try:
+                    chunk_payload = self._normalize_raw_result(raw_chunk)
+                    chunk_offset_seconds = float(start_frame) / float(sample_rate)
+                    chunks.append((chunk_offset_seconds, chunk_payload))
+                finally:
+                    del raw_chunk
 
                 if end_frame >= total_frames:
                     break
@@ -535,3 +601,70 @@ def _fmt_gib(value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"{float(value):.2f}"
     return "n/a"
+
+
+def _ensure_extracted_nemo_cache(
+    nemo_file: Path,
+    *,
+    SaveRestoreConnector: Any,
+) -> Path:
+    extracted_dir = nemo_file.with_name(f"{nemo_file.name}.extracted")
+    if _is_extracted_nemo_dir_complete(extracted_dir):
+        return extracted_dir
+
+    tmpdir = extracted_dir.with_name(f"{extracted_dir.name}.tmp")
+    if tmpdir.exists():
+        shutil.rmtree(tmpdir)
+    tmpdir.mkdir(parents=True)
+    try:
+        SaveRestoreConnector._unpack_nemo_file(str(nemo_file), str(tmpdir))
+        if not _is_extracted_nemo_dir_complete(tmpdir):
+            raise RuntimeError(f"Extracted NeMo cache is incomplete: {tmpdir}")
+        if extracted_dir.exists():
+            shutil.rmtree(extracted_dir)
+        tmpdir.rename(extracted_dir)
+    except Exception:
+        if tmpdir.exists():
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+
+    logger.info("Prepared extracted NeMo cache at %s.", extracted_dir)
+    return extracted_dir
+
+
+def _is_extracted_nemo_dir_complete(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "model_config.yaml").is_file()
+        and (path / "model_weights.ckpt").is_file()
+    )
+
+
+def _build_save_restore_connector(
+    SaveRestoreConnector: Any,
+    *,
+    torch_load_mmap: bool,
+) -> Any:
+    if not torch_load_mmap:
+        return SaveRestoreConnector()
+
+    class MMapSaveRestoreConnector(SaveRestoreConnector):
+        @staticmethod
+        def _load_state_dict_from_disk(model_weights, map_location="cpu"):
+            import torch
+
+            try:
+                return torch.load(
+                    model_weights,
+                    map_location=map_location,
+                    weights_only=True,
+                    mmap=True,
+                )
+            except TypeError:
+                return torch.load(
+                    model_weights,
+                    map_location=map_location,
+                    weights_only=True,
+                )
+
+    return MMapSaveRestoreConnector()

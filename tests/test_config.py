@@ -9,18 +9,26 @@ def test_parses_nested_config(monkeypatch):
     monkeypatch.setenv("PARAKEET__DEVICE", "cuda")
     monkeypatch.setenv("PARAKEET__CUDA_HALF_PRECISION", "true")
     monkeypatch.setenv("PARAKEET__CUDA_CHUNK_MIN_SECONDS", "45")
+    monkeypatch.setenv("PARAKEET__USE_EXTRACTED_NEMO_CACHE", "false")
+    monkeypatch.setenv("PARAKEET__TORCH_LOAD_MMAP", "false")
     monkeypatch.setenv("DIARIZATION__PRELOAD_MODEL", "true")
     monkeypatch.setenv("MAX_CONCURRENT_TRANSCRIPTIONS", "7")
     monkeypatch.setenv("MODEL_IDLE_EVICT_MINUTES", "15")
+    monkeypatch.setenv("MODEL_PROCESS_ISOLATION", "true")
+    monkeypatch.setenv("UNLOAD_ASR_BEFORE_DIARIZATION", "false")
 
     settings = Settings()
 
     assert settings.parakeet.device == "cuda"
     assert settings.parakeet.cuda_half_precision is True
     assert settings.parakeet.cuda_chunk_min_seconds == 45
+    assert settings.parakeet.use_extracted_nemo_cache is False
+    assert settings.parakeet.torch_load_mmap is False
     assert settings.diarization.preload_model is True
     assert settings.max_concurrent_transcriptions == 7
     assert settings.model_idle_evict_minutes == 15
+    assert settings.model_process_isolation is True
+    assert settings.unload_asr_before_diarization is False
     assert settings.configured_api_keys() == {"k1"}
 
 

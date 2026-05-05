@@ -1,40 +1,39 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
-
-import numpy as np
-import soundfile as sf
 
 TARGET_SAMPLE_RATE = 16_000
 
 
-def _resample_linear(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
-    if source_rate == target_rate:
-        return audio.astype(np.float32)
-
-    if audio.size == 0:
-        return audio.astype(np.float32)
-
-    duration = audio.shape[0] / float(source_rate)
-    output_length = max(1, int(round(duration * target_rate)))
-    x_old = np.linspace(0.0, 1.0, num=audio.shape[0], endpoint=False)
-    x_new = np.linspace(0.0, 1.0, num=output_length, endpoint=False)
-    return np.interp(x_new, x_old, audio).astype(np.float32)
-
-
 def normalize_audio_to_wav(input_path: Path, output_path: Path) -> Path:
-    data, sample_rate = sf.read(str(input_path), always_2d=True)
-
-    mono = data.mean(axis=1)
-    mono = _resample_linear(mono, int(sample_rate), TARGET_SAMPLE_RATE)
-    mono = np.clip(mono, -1.0, 1.0)
-
-    sf.write(
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(input_path),
+        "-ac",
+        "1",
+        "-ar",
+        str(TARGET_SAMPLE_RATE),
+        "-f",
+        "wav",
+        "-acodec",
+        "pcm_s16le",
         str(output_path),
-        mono,
-        TARGET_SAMPLE_RATE,
-        format="WAV",
-        subtype="PCM_16",
-    )
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg is required to normalize audio for transcription") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        message = "ffmpeg failed to normalize audio"
+        if detail:
+            message = f"{message}: {detail}"
+        raise RuntimeError(message) from exc
 
     return output_path

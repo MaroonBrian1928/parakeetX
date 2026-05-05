@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request
 from .config import get_settings
 from .deps import (
     get_diarization_manager,
+    get_model_worker_client,
     get_parakeet_manager,
 )
 from .log_filters import install_noisy_dependency_log_filters
@@ -79,6 +80,13 @@ async def startup() -> None:
     if settings.diarization.preload_model:
         diarization = get_diarization_manager()
         await asyncio.to_thread(diarization.load_model)
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    worker_client = get_model_worker_client()
+    if worker_client is not None:
+        await asyncio.to_thread(worker_client.shutdown)
 
 
 app.include_router(transcriptions.router)
