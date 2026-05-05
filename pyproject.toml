@@ -21,6 +21,10 @@ nemo = [
 diarization = [
   "pyannote.audio>=3.3.0",
 ]
+vad = [
+  "onnxruntime>=1.19.0",
+  "silero-vad>=6.2.0",
+]
 cuda = [
   "torch>=2.3.0",
 ]

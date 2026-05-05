@@ -12,7 +12,7 @@ import numpy as np
 import soundfile as sf
 
 from ..config import ParakeetSettings
-from ..log_filters import install_noisy_dependency_log_filters
+from ..log_filters import install_noisy_dependency_log_filters, suppress_noisy_dependency_streams
 from ..memory import release_memory_to_os
 from .idle_eviction import IdleModelEvictor
 from .model_worker import ModelWorkerClient
@@ -52,12 +52,8 @@ class ParakeetModelManager:
         return self._settings.model_name
 
     def status(self) -> dict[str, Any]:
-        if self._worker_client is not None:
-            status = self._worker_client.parakeet_status()
-            status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
-            return status
         return {
-            "loaded": self._model is not None,
+            "loaded": self._is_loaded(),
             "model_name": self._settings.model_name,
             "device": self._settings.device,
             "idle_evict_minutes": self._idle_evictor.idle_minutes,
@@ -75,35 +71,38 @@ class ParakeetModelManager:
             if self._model is not None:
                 return self.status()
 
+            install_noisy_dependency_log_filters()
             try:
-                from nemo.collections.asr.models import ASRModel
-                from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
+                with suppress_noisy_dependency_streams():
+                    from nemo.collections.asr.models import ASRModel
+                    from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
             except ImportError as exc:
                 raise RuntimeError(
                     "NeMo ASR dependencies are not installed. Install with `uv sync --extra nemo`."
                 ) from exc
-            install_noisy_dependency_log_filters()
 
             save_restore_connector = _build_save_restore_connector(
                 SaveRestoreConnector,
                 torch_load_mmap=self._settings.torch_load_mmap,
             )
             if self._settings.use_extracted_nemo_cache:
-                model_file = ASRModel.from_pretrained(
-                    self._settings.model_name,
-                    return_model_file=True,
-                )
+                with suppress_noisy_dependency_streams():
+                    model_file = ASRModel.from_pretrained(
+                        self._settings.model_name,
+                        return_model_file=True,
+                    )
                 extracted_dir = _ensure_extracted_nemo_cache(
                     Path(model_file),
                     SaveRestoreConnector=SaveRestoreConnector,
                 )
                 save_restore_connector.model_extracted_dir = str(extracted_dir)
 
-            self._model = ASRModel.from_pretrained(
-                self._settings.model_name,
-                map_location=self._settings.device,
-                save_restore_connector=save_restore_connector,
-            )
+            with suppress_noisy_dependency_streams():
+                self._model = ASRModel.from_pretrained(
+                    self._settings.model_name,
+                    map_location=self._settings.device,
+                    save_restore_connector=save_restore_connector,
+                )
 
             self._configure_cuda_runtime(self._model)
             self._configure_decoding(self._model)
@@ -130,6 +129,8 @@ class ParakeetModelManager:
 
     def _configure_decoding(self, model: Any) -> None:
         if not self._settings.device.startswith("cuda"):
+            return
+        if not self._settings.cuda_force_greedy_decoding:
             return
 
         decoding_cfg = getattr(getattr(model, "cfg", None), "decoding", None)
@@ -220,6 +221,127 @@ class ParakeetModelManager:
                 )
         finally:
             release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
+
+    def transcribe_regions(
+        self,
+        audio_path: Path,
+        regions: list[dict[str, Any]],
+        *,
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        if language and language.lower() not in {"en", "english"}:
+            raise ValueError("Only English transcription is supported")
+
+        if self._worker_client is not None:
+            with self._idle_evictor.use():
+                result = self._worker_client.transcribe_parakeet_regions(
+                    audio_path,
+                    regions,
+                    language=language,
+                )
+                self._worker_loaded = True
+                return result
+
+        if not regions:
+            return {
+                "text": "",
+                "words": [],
+                "segments": [],
+                "language": "en",
+                "model": self._settings.model_name,
+            }
+
+        info = sf.info(str(audio_path))
+        sample_rate = int(info.samplerate)
+        total_frames = int(info.frames)
+        chunk_plan = self._resolve_chunk_plan(audio_path)
+        asr_regions = _coalesce_regions_for_asr(
+            regions,
+            max_region_seconds=chunk_plan["chunk_seconds"],
+        )
+
+        try:
+            with self._idle_evictor.use():
+                model = self._model
+                if model is None:
+                    self.load_model()
+                    model = self._model
+
+                if model is None:
+                    raise RuntimeError("Parakeet model failed to load")
+
+                chunk_paths: list[Path] = []
+                chunk_offsets: list[float] = []
+                with tempfile.TemporaryDirectory(prefix="parakeetx-vad-chunks-", dir=str(audio_path.parent)) as tmpdir:
+                    chunk_dir = Path(tmpdir)
+                    for index, region in enumerate(asr_regions):
+                        start_seconds = max(0.0, _safe_float(region.get("start", 0.0)))
+                        end_seconds = max(start_seconds, _safe_float(region.get("end", start_seconds)))
+                        start_frame = min(total_frames, max(0, int(start_seconds * sample_rate)))
+                        end_frame = min(total_frames, max(start_frame, int(end_seconds * sample_rate)))
+                        if end_frame <= start_frame:
+                            continue
+
+                        audio_chunk, _ = sf.read(
+                            str(audio_path),
+                            start=start_frame,
+                            stop=end_frame,
+                            dtype="float32",
+                            always_2d=False,
+                        )
+                        if audio_chunk.size == 0:
+                            continue
+
+                        chunk_path = chunk_dir / f"vad_chunk_{index:04d}.wav"
+                        sf.write(
+                            str(chunk_path),
+                            np.asarray(audio_chunk, dtype=np.float32),
+                            sample_rate,
+                            format="WAV",
+                            subtype="PCM_16",
+                        )
+                        chunk_paths.append(chunk_path)
+                        chunk_offsets.append(float(start_frame) / float(sample_rate))
+
+                    if not chunk_paths:
+                        return {
+                            "text": "",
+                            "words": [],
+                            "segments": [],
+                            "language": "en",
+                            "model": self._settings.model_name,
+                        }
+
+                    install_noisy_dependency_log_filters()
+                    _log_vad_batch_plan(
+                        chunk_paths,
+                        chunk_offsets,
+                        device=self._settings.device,
+                    )
+                    raw = model.transcribe(
+                        [str(chunk_path) for chunk_path in chunk_paths],
+                        timestamps=True,
+                    )
+                    try:
+                        chunks = [
+                            (offset, self._normalize_raw_result(item))
+                            for offset, item in zip(chunk_offsets, _iter_transcript_items(raw))
+                        ]
+                    finally:
+                        del raw
+
+                return self._merge_chunk_payloads(chunks)
+        finally:
+            release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
+
+    def _transcribe_regions_local(
+        self,
+        audio_path: Path,
+        regions: list[dict[str, Any]],
+        *,
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        return self.transcribe_regions(audio_path, regions, language=language)
 
     def _is_loaded(self) -> bool:
         if self._worker_client is not None:
@@ -557,6 +679,12 @@ def _first_transcript_item(raw: Any) -> Any:
     return item
 
 
+def _iter_transcript_items(raw: Any) -> list[Any]:
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    return [raw]
+
+
 def _transcript_timestamps(item: Any) -> dict[str, Any]:
     for field in ("timestamps", "timestamp", "timestep"):
         timestamps = _get_field(item, field, default=None)
@@ -601,6 +729,109 @@ def _fmt_gib(value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"{float(value):.2f}"
     return "n/a"
+
+
+def _log_vad_batch_plan(
+    chunk_paths: list[Path],
+    chunk_offsets: list[float],
+    *,
+    device: str,
+) -> None:
+    if not chunk_paths:
+        return
+    durations = [_audio_duration_seconds(path) for path in chunk_paths]
+    total_speech_seconds = sum(durations)
+    max_duration = max(durations) if durations else 0.0
+    first_offset = chunk_offsets[0] if chunk_offsets else 0.0
+    last_offset = chunk_offsets[-1] if chunk_offsets else 0.0
+    message = (
+        "ASR VAD batch plan: chunks=%s speech_duration=%.2fs max_chunk=%.2fs "
+        "device=%s first_offset=%.2fs last_offset=%.2fs"
+    ) % (
+        len(chunk_paths),
+        total_speech_seconds,
+        max_duration,
+        device,
+        first_offset,
+        last_offset,
+    )
+
+
+def _coalesce_regions_for_asr(
+    regions: list[dict[str, Any]],
+    *,
+    max_region_seconds: int | None,
+) -> list[dict[str, Any]]:
+    if not regions or max_region_seconds is None:
+        return regions
+
+    max_seconds = float(max_region_seconds)
+    coalesced: list[dict[str, Any]] = []
+    current_start: float | None = None
+    current_end: float | None = None
+    current_segments: list[tuple[float, float]] = []
+
+    for region in regions:
+        start = max(0.0, _safe_float(region.get("start", 0.0)))
+        end = max(start, _safe_float(region.get("end", start)))
+        if end <= start:
+            continue
+
+        child_segments = _region_child_segments(region, start=start, end=end)
+        if current_start is None or current_end is None:
+            current_start = start
+            current_end = end
+            current_segments = child_segments
+            continue
+
+        if end - current_start > max_seconds and current_end > current_start:
+            coalesced.append(
+                {
+                    "start": current_start,
+                    "end": current_end,
+                    "segments": current_segments,
+                }
+            )
+            current_start = start
+            current_segments = child_segments
+        else:
+            current_segments.extend(child_segments)
+
+        current_end = end
+
+    if current_start is not None and current_end is not None and current_end > current_start:
+        coalesced.append(
+            {
+                "start": current_start,
+                "end": current_end,
+                "segments": current_segments,
+            }
+        )
+
+    return coalesced
+
+
+def _region_child_segments(
+    region: dict[str, Any],
+    *,
+    start: float,
+    end: float,
+) -> list[tuple[float, float]]:
+    raw_segments = region.get("segments")
+    if not isinstance(raw_segments, list):
+        return [(start, end)]
+
+    child_segments: list[tuple[float, float]] = []
+    for item in raw_segments:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        child_start = max(start, _safe_float(item[0], start))
+        child_end = min(end, max(child_start, _safe_float(item[1], child_start)))
+        if child_end > child_start:
+            child_segments.append((child_start, child_end))
+    return child_segments or [(start, end)]
+    logger.info(message)
+    print(message, file=sys.stderr, flush=True)
 
 
 def _ensure_extracted_nemo_cache(

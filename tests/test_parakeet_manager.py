@@ -131,6 +131,114 @@ def test_transcribe_chunked_merges_offsets(tmp_path: Path) -> None:
     assert fake_model.calls == ["chunk_0000.wav", "chunk_0001.wav", "chunk_0002.wav"]
 
 
+def test_transcribe_regions_merges_vad_offsets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    audio_path = tmp_path / "audio.wav"
+    _write_silent_wav(audio_path, duration_seconds=10.0)
+
+    manager = ParakeetModelManager(ParakeetSettings())
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def transcribe(self, audio_paths, timestamps=True):
+            _ = timestamps
+            self.calls.append([Path(path).name for path in audio_paths])
+            return [
+                {
+                    "text": "hello",
+                    "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
+                    "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "hello"}],
+                    "language": "en",
+                },
+                {
+                    "text": "world",
+                    "words": [{"word": "world", "start": 0.0, "end": 0.5}],
+                    "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "world"}],
+                    "language": "en",
+                },
+            ]
+
+    fake_model = FakeModel()
+    manager._model = fake_model
+
+    payload = manager.transcribe_regions(
+        audio_path,
+        [{"start": 2.0, "end": 3.0}, {"start": 7.0, "end": 8.0}],
+    )
+
+    assert payload["text"] == "hello world"
+    assert payload["words"][0]["start"] == pytest.approx(2.0)
+    assert payload["words"][1]["start"] == pytest.approx(7.0)
+    assert payload["segments"][0]["start"] == pytest.approx(2.0)
+    assert payload["segments"][1]["start"] == pytest.approx(7.0)
+    assert fake_model.calls == [["vad_chunk_0000.wav", "vad_chunk_0001.wav"]]
+
+
+def test_transcribe_regions_coalesces_vad_regions_to_asr_chunk_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "audio.wav"
+    _write_silent_wav(audio_path, duration_seconds=10.0)
+
+    manager = ParakeetModelManager(ParakeetSettings(device="cuda"))
+    monkeypatch.setattr(
+        manager,
+        "_resolve_chunk_plan",
+        lambda path: {
+            "chunk_seconds": 5,
+            "reason": "test",
+            "duration_seconds": 10.0,
+            "chunk_policy": "test",
+            "gpu_name": None,
+            "free_gib": None,
+            "total_gib": None,
+        },
+    )
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+            self.durations: list[float] = []
+
+        def transcribe(self, audio_paths, timestamps=True):
+            _ = timestamps
+            self.calls.append([Path(path).name for path in audio_paths])
+            self.durations.extend(sf.info(path).duration for path in audio_paths)
+            return [
+                {
+                    "text": "first",
+                    "words": [{"word": "first", "start": 0.0, "end": 0.5}],
+                    "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "first"}],
+                    "language": "en",
+                },
+                {
+                    "text": "second",
+                    "words": [{"word": "second", "start": 0.0, "end": 0.5}],
+                    "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "second"}],
+                    "language": "en",
+                },
+            ]
+
+    fake_model = FakeModel()
+    manager._model = fake_model
+
+    payload = manager.transcribe_regions(
+        audio_path,
+        [
+            {"start": 0.0, "end": 2.0},
+            {"start": 3.0, "end": 4.0},
+            {"start": 6.0, "end": 8.0},
+        ],
+    )
+
+    assert fake_model.calls == [["vad_chunk_0000.wav", "vad_chunk_0001.wav"]]
+    assert fake_model.durations == pytest.approx([4.0, 2.0])
+    assert payload["words"][0]["start"] == pytest.approx(0.0)
+    assert payload["words"][1]["start"] == pytest.approx(6.0)
+
+
 def test_normalize_raw_result_handles_nemo_hypothesis_object() -> None:
     settings = ParakeetSettings()
     manager = ParakeetModelManager(settings)
@@ -201,6 +309,57 @@ def test_configure_cuda_runtime_moves_model_and_enables_half(monkeypatch: pytest
     assert model.half_called is True
 
 
+def test_configure_decoding_leaves_greedy_batch_by_default() -> None:
+    settings = ParakeetSettings(device="cuda")
+    manager = ParakeetModelManager(settings)
+    decoding = types.SimpleNamespace(strategy="greedy_batch")
+    model = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(decoding=decoding),
+        change_decoding_strategy=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not change decoding strategy")
+        ),
+    )
+
+    manager._configure_decoding(model)
+
+    assert decoding.strategy == "greedy_batch"
+
+
+def test_configure_decoding_can_force_greedy(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = ParakeetSettings(device="cuda", cuda_force_greedy_decoding=True)
+    manager = ParakeetModelManager(settings)
+    decoding = types.SimpleNamespace(strategy="greedy_batch")
+    calls: list[str] = []
+
+    class FakeOpenDict:
+        def __init__(self, value):
+            self.value = value
+
+        def __enter__(self):
+            return self.value
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_omegaconf = types.SimpleNamespace(open_dict=FakeOpenDict)
+    monkeypatch.setitem(sys.modules, "omegaconf", fake_omegaconf)
+
+    def change_decoding_strategy(value, *, verbose):
+        assert value is decoding
+        assert verbose is False
+        calls.append(value.strategy)
+
+    model = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(decoding=decoding),
+        change_decoding_strategy=change_decoding_strategy,
+    )
+
+    manager._configure_decoding(model)
+
+    assert decoding.strategy == "greedy"
+    assert calls == ["greedy"]
+
+
 def test_log_chunk_plan_emits_one_line(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
     audio_path = tmp_path / "audio.wav"
     _write_silent_wav(audio_path, duration_seconds=30.0)
@@ -234,6 +393,9 @@ def test_process_isolated_parakeet_manager_delegates_to_worker(tmp_path: Path) -
             self.unloaded = False
 
         def parakeet_status(self):
+            raise AssertionError("status should not call the model worker")
+
+        def _status(self):
             return {
                 "loaded": False,
                 "model_name": "nvidia/parakeet-tdt-0.6b-v2",
@@ -246,9 +408,15 @@ def test_process_isolated_parakeet_manager_delegates_to_worker(tmp_path: Path) -
             assert language is None
             return {"text": "hello", "words": [], "segments": [], "language": "en"}
 
+        def transcribe_parakeet_regions(self, path, regions, *, language):
+            assert path == audio_path
+            assert regions == [{"start": 0.0, "end": 1.0}]
+            assert language is None
+            return {"text": "region", "words": [], "segments": [], "language": "en"}
+
         def unload_parakeet(self):
             self.unloaded = True
-            return self.parakeet_status()
+            return self._status()
 
     worker = FakeWorker()
     manager = ParakeetModelManager(
@@ -258,7 +426,9 @@ def test_process_isolated_parakeet_manager_delegates_to_worker(tmp_path: Path) -
     )
 
     assert manager.transcribe(audio_path)["text"] == "hello"
+    assert manager.transcribe_regions(audio_path, [{"start": 0.0, "end": 1.0}])["text"] == "region"
     assert manager.status()["idle_evict_minutes"] == 1
+    assert manager.status()["loaded"] is True
     manager.unload_model()
     assert worker.unloaded is True
 

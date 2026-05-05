@@ -27,6 +27,7 @@ def _payload():
             }
         ],
         "diarization": [{"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"}],
+        "vad": [{"start": 0.0, "end": 1.2}],
     }
 
 
@@ -35,6 +36,7 @@ def test_verbose_json_contains_diarization_and_speakers():
     assert verbose["segments"][0]["speaker"] == "SPEAKER_00"
     assert verbose["words"][0]["speaker"] == "SPEAKER_00"
     assert verbose["diarization"][0]["speaker"] == "SPEAKER_00"
+    assert verbose["vad"] == [{"start": 0.0, "end": 1.2}]
 
 
 def test_verbose_json_matches_whisperx_word_timestamp_shape():

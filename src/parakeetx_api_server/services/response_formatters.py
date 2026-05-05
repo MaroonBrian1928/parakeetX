@@ -24,6 +24,7 @@ def as_verbose_json(payload: dict[str, Any]) -> dict[str, Any]:
         "word_segments": word_segments,
         "segments": segments,
         "diarization": payload.get("diarization", []),
+        "vad": payload.get("vad", []),
         "model": payload.get("model"),
     }
 

@@ -1,9 +1,9 @@
 services:
-  api-cuda:
-    image: ghcr.io/maroonbrian1928/parakeetx:cuda
+  api-cuda-legacy:
+    image: ghcr.io/maroonbrian1928/parakeetx:cuda-legacy
     build:
       context: .
-      dockerfile: Dockerfile.cuda
+      dockerfile: Dockerfile.cuda-legacy
     env_file:
       - .env
     environment:

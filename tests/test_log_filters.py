@@ -3,7 +3,10 @@ from __future__ import annotations
 import logging
 import warnings
 
-from parakeetx_api_server.log_filters import install_noisy_dependency_log_filters
+from parakeetx_api_server.log_filters import (
+    install_noisy_dependency_log_filters,
+    suppress_noisy_dependency_streams,
+)
 
 
 def test_suppresses_specific_nemo_pretokenize_warning(caplog) -> None:
@@ -94,6 +97,73 @@ def test_suppresses_nemo_rnnt_timestamp_and_loss_noise(caplog) -> None:
     assert loss_message not in caplog.text
     assert kwargs_message not in caplog.text
     assert "A useful NeMo info line" in caplog.text
+
+
+def test_suppresses_nemo_startup_dependency_noise(caplog) -> None:
+    logger = logging.getLogger("nemo_logger")
+    logger.setLevel(logging.WARNING)
+    logger.propagate = True
+
+    install_noisy_dependency_log_filters()
+
+    noisy_messages = (
+        "Megatron num_microbatches_calculator not found, using Apex version.",
+        (
+            "OneLogger: Setting error_handling_strategy to "
+            "DISABLE_QUIETLY_AND_REPORT_METRIC_ERROR for rank (rank=0) with "
+            "OneLogger disabled. To override: explicitly set "
+            "error_handling_strategy parameter."
+        ),
+        "No exporters were provided. This means that no telemetry data will be collected.",
+        (
+            "/app/.venv/lib/python3.12/site-packages/pydub/utils.py:300: "
+            "SyntaxWarning: invalid escape sequence '\\('"
+        ),
+        "escape sequence '\\('",
+        "m = re.match('([su]([0-9]{1,2})p?) \\(([0-9]{1,2}) bit\\)$', token)",
+        "m2 = re.match('([su]([0-9]{1,2})p?)( \\(default\\))?$', token)",
+        "elif re.match('(flt)p?( \\(default\\))?$', token):",
+        "elif re.match('(dbl)p?( \\(default\\))?$', token):",
+    )
+
+    for message in noisy_messages:
+        logger.warning(message)
+    logger.warning("A startup warning worth seeing")
+
+    for message in noisy_messages:
+        assert message not in caplog.text
+    assert "A startup warning worth seeing" in caplog.text
+
+
+def test_suppresses_pydub_invalid_escape_warnings() -> None:
+    install_noisy_dependency_log_filters()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.warn("invalid escape sequence '\\('", SyntaxWarning)
+        warnings.warn("escape sequence '\\('", SyntaxWarning)
+        warnings.warn("Different syntax warning", SyntaxWarning)
+
+    messages = [str(warning.message) for warning in caught]
+    assert "invalid escape sequence '\\('" not in messages
+    assert "escape sequence '\\('" not in messages
+    assert "Different syntax warning" in messages
+
+
+def test_suppresses_direct_dependency_stream_noise(capsys) -> None:
+    with suppress_noisy_dependency_streams():
+        print(
+            "OneLogger: Setting error_handling_strategy to "
+            "DISABLE_QUIETLY_AND_REPORT_METRIC_ERROR for rank (rank=0) with "
+            "OneLogger disabled. To override: explicitly set "
+            "error_handling_strategy parameter."
+        )
+        print("No exporters were provided. This means that no telemetry data will be collected.")
+        print("A useful direct stream line")
+
+    captured = capsys.readouterr()
+    assert "OneLogger: Setting error_handling_strategy" not in captured.out
+    assert "No exporters were provided" not in captured.out
+    assert "A useful direct stream line" in captured.out
 
 
 def test_suppresses_pyannote_tf32_reproducibility_warning() -> None:

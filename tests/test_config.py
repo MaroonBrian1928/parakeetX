@@ -8,10 +8,19 @@ def test_parses_nested_config(monkeypatch):
     monkeypatch.setenv("PARAKEET__MODEL_NAME", "nvidia/parakeet-tdt-0.6b-v2")
     monkeypatch.setenv("PARAKEET__DEVICE", "cuda")
     monkeypatch.setenv("PARAKEET__CUDA_HALF_PRECISION", "true")
+    monkeypatch.setenv("PARAKEET__CUDA_FORCE_GREEDY_DECODING", "true")
     monkeypatch.setenv("PARAKEET__CUDA_CHUNK_MIN_SECONDS", "45")
     monkeypatch.setenv("PARAKEET__USE_EXTRACTED_NEMO_CACHE", "false")
     monkeypatch.setenv("PARAKEET__TORCH_LOAD_MMAP", "false")
     monkeypatch.setenv("DIARIZATION__PRELOAD_MODEL", "true")
+    monkeypatch.setenv("VAD__ENABLED", "true")
+    monkeypatch.setenv("VAD__METHOD", " silero ")
+    monkeypatch.setenv("VAD__USE_ONNX", "false")
+    monkeypatch.setenv("VAD__ONNX_FALLBACK_TO_JIT", "false")
+    monkeypatch.setenv("VAD__ONNX_OPSET_VERSION", "15")
+    monkeypatch.setenv("VAD__VAD_ONSET", "0.4")
+    monkeypatch.setenv("VAD__VAD_OFFSET", "0.25")
+    monkeypatch.setenv("VAD__CHUNK_SIZE", "20")
     monkeypatch.setenv("MAX_CONCURRENT_TRANSCRIPTIONS", "7")
     monkeypatch.setenv("MODEL_IDLE_EVICT_MINUTES", "15")
     monkeypatch.setenv("MODEL_PROCESS_ISOLATION", "true")
@@ -21,10 +30,19 @@ def test_parses_nested_config(monkeypatch):
 
     assert settings.parakeet.device == "cuda"
     assert settings.parakeet.cuda_half_precision is True
+    assert settings.parakeet.cuda_force_greedy_decoding is True
     assert settings.parakeet.cuda_chunk_min_seconds == 45
     assert settings.parakeet.use_extracted_nemo_cache is False
     assert settings.parakeet.torch_load_mmap is False
     assert settings.diarization.preload_model is True
+    assert settings.vad.enabled is True
+    assert settings.vad.method == "silero"
+    assert settings.vad.use_onnx is False
+    assert settings.vad.onnx_fallback_to_jit is False
+    assert settings.vad.onnx_opset_version == 15
+    assert settings.vad.vad_onset == 0.4
+    assert settings.vad.vad_offset == 0.25
+    assert settings.vad.chunk_size == 20
     assert settings.max_concurrent_transcriptions == 7
     assert settings.model_idle_evict_minutes == 15
     assert settings.model_process_isolation is True

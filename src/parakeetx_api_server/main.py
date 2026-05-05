@@ -4,7 +4,6 @@ import asyncio
 import logging
 import sys
 import time
-import warnings
 
 from fastapi import FastAPI, Request
 
@@ -13,6 +12,7 @@ from .deps import (
     get_diarization_manager,
     get_model_worker_client,
     get_parakeet_manager,
+    get_vad_manager,
 )
 from .log_filters import install_noisy_dependency_log_filters
 from .routers import models, transcriptions, translations
@@ -63,14 +63,6 @@ async def startup() -> None:
     app_logger.propagate = False
     install_noisy_dependency_log_filters()
 
-    # NeMo pulls pydub during model initialization; suppress noisy upstream
-    # SyntaxWarning lines from pydub regex strings without muting other warnings.
-    warnings.filterwarnings(
-        "ignore",
-        category=SyntaxWarning,
-        module=r"pydub\.utils",
-    )
-
     settings = get_settings()
 
     if settings.parakeet.preload_model:
@@ -80,6 +72,10 @@ async def startup() -> None:
     if settings.diarization.preload_model:
         diarization = get_diarization_manager()
         await asyncio.to_thread(diarization.load_model)
+
+    if settings.vad.preload_model:
+        vad = get_vad_manager()
+        await asyncio.to_thread(vad.load_model)
 
 
 @app.on_event("shutdown")

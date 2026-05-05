@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from ..auth import require_api_key
 from ..config import get_settings
 from ..deps import get_transcription_service
+from ..model_managers.vad_manager import VadOptions
 from ..services.response_formatters import as_json, as_srt, as_text, as_verbose_json, as_vtt
 from ..services.transcription import TranscriptionService
 
@@ -49,6 +50,8 @@ def _friendly_runtime_error_detail(exc: RuntimeError) -> str:
         return (
             f"{detail} "
             "Hint: this GPU/runtime combo is incompatible with the current CUDA path. "
+            "On Maxwell/TITAN-era GPUs, set `PARAKEET__CUDA_FORCE_GREEDY_DECODING=true` "
+            "to avoid NeMo's batched CUDA graph decoder. "
             "On RTX 50-series / Blackwell GPUs, rebuild or pull an image with PyTorch CUDA 12.8+ wheels. "
             "Set `PARAKEET__DEVICE_CUDA=cpu` (and optionally `DIARIZATION__DEVICE_CUDA=cpu`) "
             "to run reliably on this host."
@@ -80,6 +83,14 @@ async def create_transcription(
     temperature: float | None = Form(default=None),
     hotwords: str | None = Form(default=None),
     forced_alignment: bool = Form(default=False),
+    vad_filter: bool | None = Form(default=None),
+    vad_method: str | None = Form(default=None),
+    vad_onset: float | None = Form(default=None),
+    vad_offset: float | None = Form(default=None),
+    chunk_size: float | None = Form(default=None),
+    min_speech_duration_ms: int | None = Form(default=None),
+    min_silence_duration_ms: int | None = Form(default=None),
+    speech_pad_ms: int | None = Form(default=None),
     service: TranscriptionService = Depends(get_transcription_service),
 ):
     route_started = time.perf_counter()
@@ -167,6 +178,14 @@ async def create_transcription(
                 "temperature": temperature,
                 "hotwords_present": bool(hotwords),
                 "forced_alignment": forced_alignment,
+                "vad_filter": vad_filter,
+                "vad_method": vad_method,
+                "vad_onset": vad_onset,
+                "vad_offset": vad_offset,
+                "chunk_size": chunk_size,
+                "min_speech_duration_ms": min_speech_duration_ms,
+                "min_silence_duration_ms": min_silence_duration_ms,
+                "speech_pad_ms": speech_pad_ms,
             },
         )
 
@@ -195,6 +214,25 @@ async def create_transcription(
         )
 
     try:
+        vad_options = VadOptions.from_settings(
+            settings.vad,
+            enabled=vad_filter,
+            method=vad_method,
+            vad_onset=vad_onset,
+            vad_offset=vad_offset,
+            chunk_size=chunk_size,
+            min_speech_duration_ms=min_speech_duration_ms,
+            min_silence_duration_ms=min_silence_duration_ms,
+            speech_pad_ms=speech_pad_ms,
+        )
+        vad_options.validate()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    try:
         stage_started = time.perf_counter()
         payload = await service.transcribe_upload(
             upload=file,
@@ -203,6 +241,7 @@ async def create_transcription(
             min_speakers=min_speakers,
             max_speakers=max_speakers,
             num_speakers=num_speakers,
+            vad_options=vad_options,
         )
         _emit_route_timing("route_service", stage_started, route_started=route_started)
     except ValueError as exc:

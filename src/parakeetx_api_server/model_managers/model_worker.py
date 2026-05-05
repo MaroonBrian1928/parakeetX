@@ -54,6 +54,22 @@ class ModelWorkerClient:
             {"audio_path": str(audio_path), "language": language},
         )
 
+    def transcribe_parakeet_regions(
+        self,
+        audio_path: Path,
+        regions: list[dict[str, Any]],
+        *,
+        language: str | None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "transcribe_parakeet_regions",
+            {
+                "audio_path": str(audio_path),
+                "regions": regions,
+                "language": language,
+            },
+        )
+
     def diarization_status(self) -> dict[str, Any]:
         if not self.is_running:
             payload = _unloaded_status(self._settings_payload["diarization"])
@@ -85,6 +101,26 @@ class ModelWorkerClient:
             "diarize",
             {
                 "audio_path": str(audio_path),
+                "min_speakers": min_speakers,
+                "max_speakers": max_speakers,
+                "num_speakers": num_speakers,
+            },
+        )
+
+    def diarize_regions(
+        self,
+        audio_path: Path,
+        regions: list[dict[str, Any]],
+        *,
+        min_speakers: int | None,
+        max_speakers: int | None,
+        num_speakers: int | None,
+    ) -> list[dict[str, Any]]:
+        return self._request(
+            "diarize_regions",
+            {
+                "audio_path": str(audio_path),
+                "regions": regions,
                 "min_speakers": min_speakers,
                 "max_speakers": max_speakers,
                 "num_speakers": num_speakers,
@@ -175,6 +211,10 @@ def _model_worker_main(
     connection: Connection,
     settings_payload: dict[str, Any],
 ) -> None:
+    from ..log_filters import install_noisy_dependency_log_filters
+
+    install_noisy_dependency_log_filters()
+
     parakeet_manager = None
     diarization_manager = None
 
@@ -211,6 +251,12 @@ def _model_worker_main(
                         Path(payload["audio_path"]),
                         language=payload.get("language"),
                     )
+                elif command == "transcribe_parakeet_regions":
+                    result = parakeet_manager.transcribe_regions(
+                        Path(payload["audio_path"]),
+                        payload.get("regions", []),
+                        language=payload.get("language"),
+                    )
                 elif command == "diarization_status":
                     result = diarization_manager.status()
                 elif command == "load_diarization":
@@ -220,6 +266,14 @@ def _model_worker_main(
                 elif command == "diarize":
                     result = diarization_manager.diarize(
                         Path(payload["audio_path"]),
+                        min_speakers=payload.get("min_speakers"),
+                        max_speakers=payload.get("max_speakers"),
+                        num_speakers=payload.get("num_speakers"),
+                    )
+                elif command == "diarize_regions":
+                    result = diarization_manager.diarize_regions(
+                        Path(payload["audio_path"]),
+                        payload.get("regions", []),
                         min_speakers=payload.get("min_speakers"),
                         max_speakers=payload.get("max_speakers"),
                         num_speakers=payload.get("num_speakers"),

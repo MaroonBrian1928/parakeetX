@@ -7,6 +7,7 @@ Standalone FastAPI transcription service inspired by WhisperX API conventions, b
 - `POST /v1/audio/transcriptions` with OpenAI-style multipart fields.
 - Native Parakeet timestamps (no Whisper forced-alignment stage).
 - WhisperX-compatible word timestamp fields for downstream tools (`word_segments` and `segments[].words`).
+- Optional Silero VAD (`vad_filter=true`) that transcribes speech-only chunks with WhisperX-style VAD knobs.
 - Optional diarization via `pyannote/speaker-diarization-community-1` (`diarize=true`).
 - Speaker labels assigned to words/segments by maximum timestamp overlap.
 - `GET /health` readiness check.
@@ -70,6 +71,14 @@ Supported multipart fields:
 - `temperature`
 - `hotwords`
 - `forced_alignment`
+- `vad_filter`
+- `vad_method`
+- `vad_onset`
+- `vad_offset`
+- `chunk_size`
+- `min_speech_duration_ms`
+- `min_silence_duration_ms`
+- `speech_pad_ms`
 
 Supported response formats:
 
@@ -92,6 +101,7 @@ When `response_format=verbose_json` or `diarized_json`, response includes:
 - `segments[].speaker`
 - `words[].speaker`
 - raw `diarization` segments
+- raw merged `vad` speech chunks
 - `model`
 
 Word timestamp entries use WhisperX-style `score` when confidence is available:
@@ -124,6 +134,8 @@ Subtitle formats (`srt` / `vtt`) prefix cues with speaker labels when available.
 - `POST /v1/models/parakeet/unload`
 - `POST /v1/models/diarization/load`
 - `POST /v1/models/diarization/unload`
+- `POST /v1/models/vad/load`
+- `POST /v1/models/vad/unload`
 
 CUDA unload attempts `torch.cuda.empty_cache()`.
 Model unload also runs Python GC and, on Linux, asks glibc to trim allocator arenas.
@@ -133,8 +145,9 @@ Set `MODEL_PROCESS_ISOLATION=true` to run ASR/diarization model work in a child 
 Set `UNLOAD_ASR_BEFORE_DIARIZATION=true` only if you want lower ASR/diarization overlap at the cost of forcing Parakeet to reload for the next request.
 When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
 Adaptive chunking uses a conservative memory-based ladder, caps chunks at 600 seconds by default, and logs the chosen chunk plan at transcription start.
+Set `VAD__ENABLED=true` or pass `vad_filter=true` per request to run Silero VAD before ASR. VAD cuts the normalized audio into speech-only chunks, transcribes those chunks, then offsets word and segment timestamps back to the original timeline. Silero loads through ONNX Runtime by default (`VAD__USE_ONNX=true`) and can fall back to JIT if ONNX Runtime is unavailable or incompatible. `chunk_size`, `vad_onset`, and `vad_offset` follow the same shape as WhisperX's VAD controls.
 If CUDA reports `device not ready`, lower `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE` to a value such as `120` or reduce `PARAKEET__CUDA_CHUNK_MAX_SECONDS`.
-Maxwell/TITAN-era CUDA runs switch NeMo decoding from `greedy_batch` to `greedy` to avoid CUDA graph decoder compatibility failures while keeping ASR on GPU.
+Set `PARAKEET__CUDA_FORCE_GREEDY_DECODING=true` to switch NeMo decoding from `greedy_batch` to `greedy` if a Maxwell/TITAN-era CUDA runtime hits decoder compatibility failures.
 The default CUDA Docker image uses a CUDA 12.8 runtime and PyTorch CUDA 12.8 wheels so RTX 50-series / Blackwell GPUs can run kernels for their newer compute capability.
 
 ## Environment Variables
@@ -149,6 +162,7 @@ Core env vars:
 - `PARAKEET__LOCAL_FILES_ONLY`
 - `PARAKEET__CUDA_HALF_PRECISION`
 - `PARAKEET__CUDA_ADAPTIVE_CHUNKING`
+- `PARAKEET__CUDA_FORCE_GREEDY_DECODING`
 - `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE`
 - `PARAKEET__CUDA_CHUNK_MIN_SECONDS`
 - `PARAKEET__CUDA_CHUNK_MAX_SECONDS`
@@ -158,6 +172,18 @@ Core env vars:
 - `DIARIZATION__MODEL_NAME`
 - `DIARIZATION__DEVICE`
 - `DIARIZATION__PRELOAD_MODEL`
+- `VAD__ENABLED`
+- `VAD__METHOD`
+- `VAD__PRELOAD_MODEL`
+- `VAD__USE_ONNX`
+- `VAD__ONNX_FALLBACK_TO_JIT`
+- `VAD__ONNX_OPSET_VERSION`
+- `VAD__VAD_ONSET`
+- `VAD__VAD_OFFSET`
+- `VAD__CHUNK_SIZE`
+- `VAD__MIN_SPEECH_DURATION_MS`
+- `VAD__MIN_SILENCE_DURATION_MS`
+- `VAD__SPEECH_PAD_MS`
 - `MAX_CONCURRENT_TRANSCRIPTIONS`
 - `DEBUG_LOG_TRANSCRIPTION_PAYLOAD`
 - `MODEL_IDLE_EVICT_MINUTES`
@@ -189,16 +215,16 @@ Build CPU image:
 docker compose -f compose.cpu.yaml build
 ```
 
-Build CUDA image:
+Build Modern CUDA image:
 
 ```bash
-docker compose -f compose.yaml build
+docker compose -f compose.cuda.yaml build
 ```
 
 Build legacy CUDA image:
 
 ```bash
-docker compose -f compose.cuda-legacy.yaml build
+docker compose -f compose.yaml build
 ```
 
 Run CPU profile:
@@ -207,16 +233,16 @@ Run CPU profile:
 docker compose -f compose.cpu.yaml up
 ```
 
-Run CUDA profile:
+Run Modern CUDA profile:
 
 ```bash
-docker compose -f compose.yaml up
+docker compose -f compose.cuda.yaml up
 ```
 
 Run legacy CUDA profile:
 
 ```bash
-docker compose -f compose.cuda-legacy.yaml up
+docker compose up
 ```
 
 Default host port: `7474`.

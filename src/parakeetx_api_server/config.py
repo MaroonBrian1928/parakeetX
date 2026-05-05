@@ -26,6 +26,7 @@ class ParakeetSettings(BaseModel):
     local_files_only: bool = False
     cuda_half_precision: bool = True
     cuda_adaptive_chunking: bool = True
+    cuda_force_greedy_decoding: bool = False
     cuda_chunk_seconds_override: int | None = Field(default=None, ge=1)
     cuda_chunk_min_seconds: int = Field(default=30, ge=1)
     cuda_chunk_max_seconds: int = Field(default=600, ge=1)
@@ -58,6 +59,34 @@ class DiarizationSettings(BaseModel):
         return _strip_env_string(value)
 
 
+class VadSettings(BaseModel):
+    enabled: bool = False
+    method: str = "silero"
+    preload_model: bool = False
+    use_onnx: bool = True
+    onnx_fallback_to_jit: bool = True
+    onnx_opset_version: int = Field(default=16, ge=1)
+    vad_onset: float = Field(default=0.5, gt=0.0, lt=1.0)
+    vad_offset: float = Field(default=0.363, gt=0.0, lt=1.0)
+    chunk_size: float = Field(default=30.0, gt=0.0)
+    min_speech_duration_ms: int = Field(default=250, ge=0)
+    min_silence_duration_ms: int = Field(default=100, ge=0)
+    speech_pad_ms: int = Field(default=30, ge=0)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _strip_string_values(cls, value: object) -> object:
+        return _strip_env_string(value)
+
+    @field_validator("method")
+    @classmethod
+    def _validate_method(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized != "silero":
+            raise ValueError("Only silero VAD is supported")
+        return normalized
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -70,6 +99,7 @@ class Settings(BaseSettings):
 
     parakeet: ParakeetSettings = Field(default_factory=ParakeetSettings)
     diarization: DiarizationSettings = Field(default_factory=DiarizationSettings)
+    vad: VadSettings = Field(default_factory=VadSettings)
 
     max_concurrent_transcriptions: int = 2
     debug_log_transcription_payload: bool = False

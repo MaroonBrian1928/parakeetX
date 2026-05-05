@@ -11,6 +11,7 @@ from fastapi import UploadFile
 
 from ..model_managers.diarization_manager import DiarizationModelManager
 from ..model_managers.parakeet_manager import ParakeetModelManager
+from ..model_managers.vad_manager import VadModelManager, VadOptions
 from ..memory import release_memory_to_os
 from .audio import normalize_audio_to_wav
 from .speaker_assignment import assign_speakers
@@ -24,11 +25,13 @@ class TranscriptionService:
         *,
         parakeet_manager: ParakeetModelManager,
         diarization_manager: DiarizationModelManager,
+        vad_manager: VadModelManager,
         max_concurrency: int,
         unload_asr_before_diarization: bool = False,
     ) -> None:
         self._parakeet_manager = parakeet_manager
         self._diarization_manager = diarization_manager
+        self._vad_manager = vad_manager
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
         self._unload_asr_before_diarization = unload_asr_before_diarization
 
@@ -45,6 +48,7 @@ class TranscriptionService:
         min_speakers: int | None,
         max_speakers: int | None,
         num_speakers: int | None,
+        vad_options: VadOptions,
     ) -> dict[str, Any]:
         request_started = time.perf_counter()
         suffix = Path(upload.filename or "upload.wav").suffix or ".wav"
@@ -85,12 +89,35 @@ class TranscriptionService:
                         request_started=request_started,
                     )
 
+                    vad_segments: list[dict[str, Any]] = []
+                    if vad_options.enabled:
+                        stage_started = time.perf_counter()
+                        vad_segments = await asyncio.to_thread(
+                            self._vad_manager.detect,
+                            normalized_path,
+                            vad_options,
+                        )
+                        _emit_stage_timing(
+                            "vad",
+                            stage_started,
+                            request_started=request_started,
+                            extra=f"segments={len(vad_segments)}",
+                        )
+
                     stage_started = time.perf_counter()
-                    asr_payload = await asyncio.to_thread(
-                        self._parakeet_manager.transcribe,
-                        normalized_path,
-                        language=language,
-                    )
+                    if vad_options.enabled:
+                        asr_payload = await asyncio.to_thread(
+                            self._parakeet_manager.transcribe_regions,
+                            normalized_path,
+                            vad_segments,
+                            language=language,
+                        )
+                    else:
+                        asr_payload = await asyncio.to_thread(
+                            self._parakeet_manager.transcribe,
+                            normalized_path,
+                            language=language,
+                        )
                     _emit_stage_timing(
                         "asr",
                         stage_started,
@@ -113,18 +140,31 @@ class TranscriptionService:
                             )
 
                         stage_started = time.perf_counter()
-                        diarization_segments = await asyncio.to_thread(
-                            self._diarization_manager.diarize,
-                            normalized_path,
-                            min_speakers=min_speakers,
-                            max_speakers=max_speakers,
-                            num_speakers=num_speakers,
-                        )
+                        if vad_options.enabled:
+                            diarization_segments = await asyncio.to_thread(
+                                self._diarization_manager.diarize_regions,
+                                normalized_path,
+                                vad_segments,
+                                min_speakers=min_speakers,
+                                max_speakers=max_speakers,
+                                num_speakers=num_speakers,
+                            )
+                        else:
+                            diarization_segments = await asyncio.to_thread(
+                                self._diarization_manager.diarize,
+                                normalized_path,
+                                min_speakers=min_speakers,
+                                max_speakers=max_speakers,
+                                num_speakers=num_speakers,
+                            )
                         _emit_stage_timing(
                             "diarization",
                             stage_started,
                             request_started=request_started,
-                            extra=f"segments={len(diarization_segments)}",
+                            extra=(
+                                f"segments={len(diarization_segments)} "
+                                f"vad_compacted={str(vad_options.enabled).lower()}"
+                            ),
                         )
 
                     stage_started = time.perf_counter()
@@ -148,6 +188,7 @@ class TranscriptionService:
                         "words": words,
                         "segments": segments,
                         "diarization": diarization_segments,
+                        "vad": vad_segments,
                     }
         finally:
             release_memory_to_os(clear_cuda=True)
