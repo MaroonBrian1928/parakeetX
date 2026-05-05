@@ -1,0 +1,98 @@
+# Destructive GGUF-Only ASR Migration
+
+## Summary
+Replace the current NeMo/PyTorch Parakeet ASR path with one canonical GGUF path using `cstr/parakeet-tdt-0.6b-v3-GGUF` Q8_0 and CrispASR. This is intentionally destructive: no backend selector, no NeMo fallback, no mmap/extracted-cache experiments, no CUDA chunk flags, and no `MODEL_PROCESS_ISOLATION` switch for ASR.
+
+The goal is to remove the 2.47 GB NeMo checkpoint load path entirely. Q8_0 is a ~745 MB GGUF artifact on Hugging Face, and CrispASR is a no-Python/no-PyTorch C++ runtime with JSON output support.
+
+Sources: [GGUF model](https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF), [Q8_0 file](https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF/blob/main/parakeet-tdt-0.6b-v3-q8_0.gguf), [CrispASR](https://github.com/CrispStrobe/CrispASR), [CrispASR CLI docs](https://raw.githubusercontent.com/CrispStrobe/CrispASR/main/docs/cli.md).
+
+## Key Changes
+- Replace `ParakeetModelManager` with a GGUF/CrispASR implementation that shells out to one installed `crispasr` binary.
+- Hard-code the ASR backend as Parakeet GGUF Q8_0:
+  - model file: `/models/parakeet-tdt-0.6b-v3-q8_0.gguf`
+  - command shape: `crispasr --backend parakeet -m <model> -f <normalized.wav> -ojf -of <output-base> -np`
+  - subprocess env always sets `CRISPASR_GGUF_MMAP=1`; this is implementation policy, not a user-facing feature flag.
+- Parse CrispASR full JSON into the existing internal payload:
+  - `text`
+  - `language`
+  - `model`
+  - `words`
+  - `segments`
+- Keep the public `/v1/audio/transcriptions` response contract unchanged, including `verbose_json`, `word_segments`, speaker assignment, SRT, and VTT.
+- Keep current English-only route validation for now; Parakeet v3 can auto-detect more languages, but this migration should not expand product behavior while replacing the runtime.
+
+## Destructive Removals
+- Delete all NeMo ASR loading code:
+  - `ASRModel.from_pretrained`
+  - `SaveRestoreConnector`
+  - extracted `.nemo` cache support
+  - PyTorch mmap checkpoint connector
+  - NeMo CUDA half-precision setup
+  - NeMo greedy-batch CUDA workaround
+  - NeMo raw `Hypothesis` normalization tests
+- Remove ASR chunking machinery and env vars:
+  - `PARAKEET__CUDA_ADAPTIVE_CHUNKING`
+  - `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE`
+  - `PARAKEET__CUDA_CHUNK_MIN_SECONDS`
+  - `PARAKEET__CUDA_CHUNK_MAX_SECONDS`
+  - `PARAKEET__CUDA_CHUNK_OVERLAP_SECONDS`
+- Remove failed experiment/env knobs:
+  - `PARAKEET__USE_EXTRACTED_NEMO_CACHE`
+  - `PARAKEET__TORCH_LOAD_MMAP`
+  - `UNLOAD_ASR_BEFORE_DIARIZATION`
+  - `MODEL_PROCESS_ISOLATION` as an ASR concern
+- Remove ASR preload/load/unload semantics. `/v1/models/parakeet/load` becomes a cheap validation endpoint that checks the binary and model file exist; `/unload` reports unloaded/no resident ASR model.
+- Remove the `nemo` optional dependency from `pyproject.toml` and stop installing NeMo in Docker images.
+- Rewrite CUDA error hints that currently mention PyTorch wheels and chunk overrides; ASR no longer uses that path.
+
+## Implementation Shape
+- Add a small CrispASR runner module responsible for:
+  - building the subprocess args
+  - creating a temp output base
+  - running with timeout/error capture
+  - reading `<output-base>.json`
+  - converting timestamps from ms/string fields to seconds
+- Keep `TranscriptionService` mostly intact:
+  - upload streaming stays
+  - ffmpeg normalization stays
+  - ASR call swaps from NeMo manager to CrispASR runner
+  - diarization and speaker assignment stay after ASR
+- Keep pyannote diarization for `diarize=true`, but make its lifecycle non-configurable:
+  - no ASR unload-before-diarization branch
+  - keep explicit cleanup and `malloc_trim`
+  - keep idle eviction if already useful for pyannote, but do not expose it as a backend strategy for ASR
+- Docker:
+  - build/install CrispASR in a multi-stage layer
+  - copy `crispasr` into the runtime image
+  - download or require the Q8_0 GGUF at `/models/parakeet-tdt-0.6b-v3-q8_0.gguf`
+  - remove `uv sync --extra nemo`
+  - keep pyannote/torch only for diarization-capable images
+- Docs/env:
+  - shrink `.env.example` to core knobs only
+  - document that ASR is GGUF-only
+  - document expected memory behavior as “no 2.47 GB NeMo checkpoint restore path”
+  - remove the model-control section text that describes NeMo/PyTorch CUDA behavior
+
+## Tests
+- Replace NeMo manager tests with CrispASR runner tests:
+  - command construction includes `--backend parakeet`, `-ojf`, `-np`, model path, and normalized input path
+  - `CRISPASR_GGUF_MMAP=1` is always injected
+  - sample CrispASR JSON maps to current `text`, `words`, `segments`, and `language`
+  - missing binary/model file raises clear `RuntimeError`
+  - subprocess failure includes stderr/stdout in a safe error message
+- Update config tests to assert removed env vars are no longer parsed.
+- Update route error tests to remove CUDA chunk/PyTorch hints.
+- Keep response formatter, audio normalization, diarization, and speaker assignment tests.
+- Run `mise run test`.
+- Acceptance check after implementation:
+  - rebuild Docker
+  - run one transcription
+  - verify `docker stats` no longer shows a multi-GB ASR restore spike from NeMo
+  - verify `/v1/models/status` reports GGUF ASR availability without claiming a resident NeMo model
+
+## Assumptions
+- This plan intentionally replaces `nvidia/parakeet-tdt-0.6b-v2` NeMo with `nvidia/parakeet-tdt-0.6b-v3` GGUF Q8_0.
+- No NeMo fallback will remain.
+- No ASR backend feature flag will be added.
+- Diarization remains supported because it is a separate feature from the Parakeet checkpoint problem.

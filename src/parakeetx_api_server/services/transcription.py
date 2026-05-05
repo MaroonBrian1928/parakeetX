@@ -25,12 +25,10 @@ class TranscriptionService:
         parakeet_manager: ParakeetModelManager,
         diarization_manager: DiarizationModelManager,
         max_concurrency: int,
-        unload_asr_before_diarization: bool = False,
     ) -> None:
         self._parakeet_manager = parakeet_manager
         self._diarization_manager = diarization_manager
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
-        self._unload_asr_before_diarization = unload_asr_before_diarization
 
     @property
     def configured_model_name(self) -> str:
@@ -103,15 +101,6 @@ class TranscriptionService:
 
                     diarization_segments: list[dict[str, Any]] = []
                     if diarize:
-                        if self._unload_asr_before_diarization:
-                            stage_started = time.perf_counter()
-                            await asyncio.to_thread(self._parakeet_manager.unload_model)
-                            _emit_stage_timing(
-                                "asr_unload_before_diarization",
-                                stage_started,
-                                request_started=request_started,
-                            )
-
                         stage_started = time.perf_counter()
                         diarization_segments = await asyncio.to_thread(
                             self._diarization_manager.diarize,

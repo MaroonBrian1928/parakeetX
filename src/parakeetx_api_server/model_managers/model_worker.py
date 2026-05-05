@@ -192,7 +192,6 @@ def _model_worker_main(
 
                     parakeet_manager = ParakeetModelManager(
                         ParakeetSettings(**settings_payload["parakeet"]),
-                        idle_evict_minutes=None,
                     )
                     diarization_manager = DiarizationModelManager(
                         DiarizationSettings(**settings_payload["diarization"]),
@@ -243,6 +242,6 @@ def _unloaded_status(settings_payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "loaded": False,
         "model_name": settings_payload["model_name"],
-        "device": settings_payload["device"],
+        "device": settings_payload.get("device"),
         "idle_evict_minutes": None,
     }

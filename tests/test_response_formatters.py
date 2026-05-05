@@ -7,7 +7,7 @@ def _payload():
     return {
         "text": "hello world",
         "language": "en",
-        "model": "nvidia/parakeet-tdt-0.6b-v2",
+        "model": "cstr/parakeet-tdt-0.6b-v3-GGUF",
         "segments": [
             {
                 "id": 0,

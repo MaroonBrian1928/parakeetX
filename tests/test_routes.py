@@ -27,7 +27,7 @@ class FakeTranscriptionService:
         return {
             "text": "hello world",
             "language": "en",
-            "model": "nvidia/parakeet-tdt-0.6b-v2",
+            "model": "cstr/parakeet-tdt-0.6b-v3-GGUF",
             "words": [
                 {
                     "word": "hello",
@@ -103,21 +103,22 @@ def test_unsupported_feature_failures(client, wav_bytes):
     assert hotwords_response.status_code == 422
 
 
-def test_cuda_kernel_image_error_mentions_blackwell_image_rebuild():
+def test_cuda_kernel_image_error_mentions_diarization_cuda_path():
     detail = _friendly_runtime_error_detail(
         RuntimeError("CUDA error: no kernel image is available for execution on the device")
     )
 
-    assert "PyTorch CUDA 12.8+ wheels" in detail
+    assert "diarization CUDA path" in detail
+    assert "DIARIZATION__DEVICE_CUDA=cpu" in detail
 
 
-def test_cuda_device_not_ready_error_mentions_smaller_chunks():
+def test_cuda_device_not_ready_error_mentions_diarization_cpu_escape():
     detail = _friendly_runtime_error_detail(
         RuntimeError("CUDA driver error: device not ready")
     )
 
-    assert "PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE" in detail
-    assert "120" in detail
+    assert "diarize=false" in detail
+    assert "DIARIZATION__DEVICE_CUDA=cpu" in detail
 
 
 def test_translations_return_501(client):

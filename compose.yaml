@@ -1,13 +1,13 @@
 services:
-  api-cuda:
-    image: ghcr.io/maroonbrian1928/parakeetx:cuda
+  api-cuda-legacy:
+    image: ghcr.io/maroonbrian1928/parakeetx:cuda-legacy
     build:
       context: .
-      dockerfile: Dockerfile.cuda
+      dockerfile: Dockerfile.cuda-legacy
     env_file:
       - .env
     environment:
-      PARAKEET__DEVICE: ${PARAKEET__DEVICE_CUDA:-cuda}
+      CRISPASR_GPU_BACKEND: cuda
       DIARIZATION__DEVICE: ${DIARIZATION__DEVICE_CUDA:-cpu}
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     ports:

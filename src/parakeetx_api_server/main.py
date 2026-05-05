@@ -11,7 +11,6 @@ from fastapi import FastAPI, Request
 from .config import get_settings
 from .deps import (
     get_diarization_manager,
-    get_model_worker_client,
     get_parakeet_manager,
 )
 from .log_filters import install_noisy_dependency_log_filters
@@ -56,15 +55,15 @@ async def log_transcription_request_wall_time(request: Request, call_next):
 @app.on_event("startup")
 async def startup() -> None:
     # Attach application logs to uvicorn's visible handlers so per-request
-    # ASR chunk planning and model-routing diagnostics appear in container logs.
+    # ASR and diarization diagnostics appear in container logs.
     app_logger = logging.getLogger("parakeetx_api_server")
     app_logger.handlers = list(logging.getLogger("uvicorn.error").handlers)
     app_logger.setLevel(logging.INFO)
     app_logger.propagate = False
     install_noisy_dependency_log_filters()
 
-    # NeMo pulls pydub during model initialization; suppress noisy upstream
-    # SyntaxWarning lines from pydub regex strings without muting other warnings.
+    # pyannote dependencies may pull pydub; suppress noisy upstream SyntaxWarning
+    # lines from pydub regex strings without muting other warnings.
     warnings.filterwarnings(
         "ignore",
         category=SyntaxWarning,
@@ -73,10 +72,6 @@ async def startup() -> None:
 
     settings = get_settings()
 
-    if settings.parakeet.preload_model:
-        parakeet = get_parakeet_manager()
-        await asyncio.to_thread(parakeet.load_model)
-
     if settings.diarization.preload_model:
         diarization = get_diarization_manager()
         await asyncio.to_thread(diarization.load_model)
@@ -84,9 +79,8 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    worker_client = get_model_worker_client()
-    if worker_client is not None:
-        await asyncio.to_thread(worker_client.shutdown)
+    parakeet = get_parakeet_manager()
+    await asyncio.to_thread(parakeet.unload_model)
 
 
 app.include_router(transcriptions.router)

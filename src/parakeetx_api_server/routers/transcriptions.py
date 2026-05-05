@@ -29,16 +29,15 @@ def _friendly_runtime_error_detail(exc: RuntimeError) -> str:
     if "out of memory" in lowered:
         return (
             f"{detail} "
-            "Hint: GPU memory is too tight for this request. Try `diarize=false`, shorter audio, "
-            "or set `PARAKEET__DEVICE_CUDA=cpu` (and optionally `DIARIZATION__DEVICE_CUDA=cpu`)."
+            "Hint: memory is too tight for this request. Try `diarize=false`, shorter audio, "
+            "or set `DIARIZATION__DEVICE_CUDA=cpu` if diarization is using the GPU."
         )
 
     if "device not ready" in lowered:
         return (
             f"{detail} "
-            "Hint: the GPU stopped responding during inference. Try a smaller "
-            "`PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE` such as `120`, or lower "
-            "`PARAKEET__CUDA_CHUNK_MAX_SECONDS`."
+            "Hint: the GPU stopped responding during diarization. Try `diarize=false` "
+            "or set `DIARIZATION__DEVICE_CUDA=cpu`."
         )
 
     if (
@@ -48,10 +47,8 @@ def _friendly_runtime_error_detail(exc: RuntimeError) -> str:
     ):
         return (
             f"{detail} "
-            "Hint: this GPU/runtime combo is incompatible with the current CUDA path. "
-            "On RTX 50-series / Blackwell GPUs, rebuild or pull an image with PyTorch CUDA 12.8+ wheels. "
-            "Set `PARAKEET__DEVICE_CUDA=cpu` (and optionally `DIARIZATION__DEVICE_CUDA=cpu`) "
-            "to run reliably on this host."
+            "Hint: this GPU/runtime combo is incompatible with the diarization CUDA path. "
+            "Set `DIARIZATION__DEVICE_CUDA=cpu` to keep ASR on GGUF/CrispASR while running diarization on CPU."
         )
 
     return detail
@@ -86,7 +83,7 @@ async def create_transcription(
     _ = speaker_embeddings
     _ = highlight_words
 
-    resolved_model = getattr(service, "configured_model_name", None) or "nvidia/parakeet-tdt-0.6b-v2"
+    resolved_model = getattr(service, "configured_model_name", None) or "cstr/parakeet-tdt-0.6b-v3-GGUF"
     if model and model != resolved_model:
         logger.info(
             "Ignoring client-provided model '%s'; using configured model '%s'.",

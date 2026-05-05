@@ -1,176 +1,48 @@
 from __future__ import annotations
 
-import logging
+import json
+import os
 import shutil
-import sys
+import subprocess
 import tempfile
-import threading
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import soundfile as sf
-
 from ..config import ParakeetSettings
-from ..log_filters import install_noisy_dependency_log_filters
 from ..memory import release_memory_to_os
-from .idle_eviction import IdleModelEvictor
-from .model_worker import ModelWorkerClient
 
-logger = logging.getLogger(__name__)
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+PARAKEET_GGUF_MODEL_NAME = "cstr/parakeet-tdt-0.6b-v3-GGUF"
+PARAKEET_GGUF_MODEL_PATH = Path("/models/parakeet-tdt-0.6b-v3-q8_0.gguf")
+CRISPASR_BINARY = "crispasr"
+CRISPASR_TIMEOUT_SECONDS = 60 * 60
 
 
 class ParakeetModelManager:
-    def __init__(
-        self,
-        settings: ParakeetSettings,
-        *,
-        idle_evict_minutes: float | None = None,
-        worker_client: ModelWorkerClient | None = None,
-    ) -> None:
+    def __init__(self, settings: ParakeetSettings) -> None:
         self._settings = settings
-        self._model: Any | None = None
-        self._worker_client = worker_client
-        self._worker_loaded = False
-        self._lock = threading.Lock()
-        self._idle_evictor = IdleModelEvictor(
-            model_label="parakeet",
-            idle_minutes=idle_evict_minutes,
-            is_loaded=self._is_loaded,
-            unload=self.unload_model,
-        )
 
     @property
     def configured_model_name(self) -> str:
         return self._settings.model_name
 
     def status(self) -> dict[str, Any]:
-        if self._worker_client is not None:
-            status = self._worker_client.parakeet_status()
-            status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
-            return status
+        binary_path = _resolve_binary(CRISPASR_BINARY)
+        model_exists = self._settings.model_path.is_file()
         return {
-            "loaded": self._model is not None,
+            "loaded": False,
+            "available": binary_path is not None and model_exists,
+            "backend": "crispasr",
             "model_name": self._settings.model_name,
-            "device": self._settings.device,
-            "idle_evict_minutes": self._idle_evictor.idle_minutes,
+            "model_path": str(self._settings.model_path),
+            "binary": binary_path or CRISPASR_BINARY,
+            "model_exists": model_exists,
         }
 
     def load_model(self) -> dict[str, Any]:
-        if self._worker_client is not None:
-            status = self._worker_client.load_parakeet()
-            self._worker_loaded = True
-            self._idle_evictor.note_loaded()
-            status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
-            return status
-
-        with self._lock:
-            if self._model is not None:
-                return self.status()
-
-            try:
-                from nemo.collections.asr.models import ASRModel
-                from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
-            except ImportError as exc:
-                raise RuntimeError(
-                    "NeMo ASR dependencies are not installed. Install with `uv sync --extra nemo`."
-                ) from exc
-            install_noisy_dependency_log_filters()
-
-            save_restore_connector = _build_save_restore_connector(
-                SaveRestoreConnector,
-                torch_load_mmap=self._settings.torch_load_mmap,
-            )
-            if self._settings.use_extracted_nemo_cache:
-                model_file = ASRModel.from_pretrained(
-                    self._settings.model_name,
-                    return_model_file=True,
-                )
-                extracted_dir = _ensure_extracted_nemo_cache(
-                    Path(model_file),
-                    SaveRestoreConnector=SaveRestoreConnector,
-                )
-                save_restore_connector.model_extracted_dir = str(extracted_dir)
-
-            self._model = ASRModel.from_pretrained(
-                self._settings.model_name,
-                map_location=self._settings.device,
-                save_restore_connector=save_restore_connector,
-            )
-
-            self._configure_cuda_runtime(self._model)
-            self._configure_decoding(self._model)
-
-        self._idle_evictor.note_loaded()
+        self._validate_runtime()
         return self.status()
 
-    def _configure_cuda_runtime(self, model: Any) -> None:
-        if not self._settings.device.startswith("cuda"):
-            return
-
-        try:
-            import torch
-
-            device = torch.device(self._settings.device)
-            if hasattr(model, "to"):
-                model.to(device)
-
-            if self._settings.cuda_half_precision and hasattr(model, "half"):
-                model.half()
-                logger.info("Enabled CUDA half precision for ASR model on %s.", self._settings.device)
-        except Exception as exc:
-            logger.warning("Unable to fully configure CUDA runtime for ASR model: %s", exc)
-
-    def _configure_decoding(self, model: Any) -> None:
-        if not self._settings.device.startswith("cuda"):
-            return
-
-        decoding_cfg = getattr(getattr(model, "cfg", None), "decoding", None)
-        strategy = getattr(decoding_cfg, "strategy", None)
-        if strategy != "greedy_batch":
-            return
-
-        # Maxwell-era GPUs can fail in NeMo's batched CUDA-graph decoder path (invalid PTX/invalid argument).
-        # Use non-batched greedy decoding on CUDA to keep GPU execution while avoiding that path.
-        try:
-            from omegaconf import open_dict
-
-            with open_dict(model.cfg.decoding):
-                model.cfg.decoding.strategy = "greedy"
-
-            model.change_decoding_strategy(model.cfg.decoding, verbose=False)
-            logger.warning(
-                "Adjusted RNNT decoding strategy from 'greedy_batch' to 'greedy' for CUDA compatibility."
-            )
-        except Exception as exc:
-            logger.warning("Unable to adjust RNNT decoding strategy for CUDA compatibility: %s", exc)
-
     def unload_model(self) -> dict[str, Any]:
-        if self._worker_client is not None:
-            self._worker_loaded = False
-            self._idle_evictor.cancel()
-            status = self._worker_client.unload_parakeet()
-            release_memory_to_os()
-            status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
-            return status
-
-        with self._lock:
-            self._model = None
-            self._idle_evictor.cancel()
-            if self._settings.device.startswith("cuda"):
-                try:
-                    import torch
-
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
         release_memory_to_os()
         return self.status()
 
@@ -183,488 +55,285 @@ class ParakeetModelManager:
         if language and language.lower() not in {"en", "english"}:
             raise ValueError("Only English transcription is supported")
 
-        if self._worker_client is not None:
-            with self._idle_evictor.use():
-                result = self._worker_client.transcribe_parakeet(
-                    audio_path,
-                    language=language,
-                )
-                self._worker_loaded = True
-                return result
-
+        self._validate_runtime()
         try:
-            with self._idle_evictor.use():
-                model = self._model
-                if model is None:
-                    self.load_model()
-                    model = self._model
-
-                if model is None:
-                    raise RuntimeError("Parakeet model failed to load")
-
-                install_noisy_dependency_log_filters()
-                chunk_plan = self._resolve_chunk_plan(audio_path)
-                self._log_chunk_plan(audio_path, chunk_plan)
-                chunk_seconds = chunk_plan["chunk_seconds"]
-                if chunk_seconds is None:
-                    raw = model.transcribe([str(audio_path)], timestamps=True)
-                    try:
-                        return self._normalize_raw_result(raw)
-                    finally:
-                        del raw
-
-                return self._transcribe_chunked(
-                    model=model,
-                    audio_path=audio_path,
-                    chunk_seconds=chunk_seconds,
-                )
-        finally:
-            release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
-
-    def _is_loaded(self) -> bool:
-        if self._worker_client is not None:
-            return self._worker_loaded
-        return self._model is not None
-
-    def _resolve_chunk_seconds(self, audio_path: Path) -> int | None:
-        return self._resolve_chunk_plan(audio_path)["chunk_seconds"]
-
-    def _resolve_chunk_plan(self, audio_path: Path) -> dict[str, Any]:
-        if not self._settings.device.startswith("cuda"):
-            return {
-                "chunk_seconds": None,
-                "reason": "non_cuda_device",
-                "duration_seconds": _audio_duration_seconds(audio_path),
-                "chunk_policy": "non_cuda",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
-        if not self._settings.cuda_adaptive_chunking:
-            return {
-                "chunk_seconds": None,
-                "reason": "adaptive_chunking_disabled",
-                "duration_seconds": _audio_duration_seconds(audio_path),
-                "chunk_policy": "disabled",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
-
-        duration_seconds = _audio_duration_seconds(audio_path)
-
-        if (
-            self._settings.cuda_chunk_seconds_override is not None
-            and self._settings.cuda_chunk_seconds_override > 0
-        ):
-            chunk_seconds = self._settings.cuda_chunk_seconds_override
-            if duration_seconds > 0:
-                chunk_seconds = min(chunk_seconds, int(max(1.0, duration_seconds)))
-            return {
-                "chunk_seconds": max(1, int(chunk_seconds)),
-                "reason": "override",
-                "duration_seconds": duration_seconds,
-                "chunk_policy": "override",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
-
-        available_gib, total_gib, gpu_name = self._cuda_memory_snapshot()
-        if available_gib is None:
-            return {
-                "chunk_seconds": None,
-                "reason": "memory_probe_failed",
-                "duration_seconds": duration_seconds,
-                "chunk_policy": "unknown",
-                "gpu_name": gpu_name,
-                "free_gib": None,
-                "total_gib": total_gib,
-            }
-
-        chunk_seconds = _chunk_seconds_for_available_gib(available_gib)
-        chunk_seconds = max(self._settings.cuda_chunk_min_seconds, chunk_seconds)
-        chunk_seconds = min(self._settings.cuda_chunk_max_seconds, chunk_seconds)
-
-        if duration_seconds > 0:
-            chunk_seconds = min(chunk_seconds, int(max(1.0, duration_seconds)))
-            if duration_seconds <= float(chunk_seconds):
-                return {
-                    "chunk_seconds": None,
-                    "reason": "audio_shorter_than_chunk",
-                    "duration_seconds": duration_seconds,
-                    "chunk_policy": "memory_only",
-                    "gpu_name": gpu_name,
-                    "free_gib": available_gib,
-                    "total_gib": total_gib,
-                }
-
-        return {
-            "chunk_seconds": max(1, int(chunk_seconds)),
-            "reason": "adaptive",
-            "duration_seconds": duration_seconds,
-            "chunk_policy": "memory_only",
-            "gpu_name": gpu_name,
-            "free_gib": available_gib,
-            "total_gib": total_gib,
-        }
-
-    def _log_chunk_plan(self, audio_path: Path, plan: dict[str, Any]) -> None:
-        message = (
-            "ASR request chunk plan: file=%s duration=%.2fs device=%s gpu=%s "
-            "policy=%s free_gib=%s total_gib=%s chunk_seconds=%s reason=%s"
-        ) % (
-            audio_path.name,
-            float(plan.get("duration_seconds") or 0.0),
-            self._settings.device,
-            plan.get("gpu_name") or "unknown",
-            plan.get("chunk_policy") or "unknown",
-            _fmt_gib(plan.get("free_gib")),
-            _fmt_gib(plan.get("total_gib")),
-            plan.get("chunk_seconds"),
-            plan.get("reason") or "unknown",
-        )
-        logger.info(message)
-        print(message, file=sys.stderr, flush=True)
-
-    def _available_cuda_memory_gib(self) -> float | None:
-        free_gib, _, _ = self._cuda_memory_snapshot()
-        return free_gib
-
-    def _cuda_memory_snapshot(self) -> tuple[float | None, float | None, str | None]:
-        try:
-            import torch
-
-            device = torch.device(self._settings.device)
-            if device.type != "cuda":
-                return None, None, None
-            free_bytes, _ = torch.cuda.mem_get_info(device)
-            props = torch.cuda.get_device_properties(device)
-            total_bytes = getattr(props, "total_memory", None)
-            gpu_name = getattr(props, "name", None)
-            total_gib = (
-                float(total_bytes) / (1024.0**3) if isinstance(total_bytes, (int, float)) and total_bytes > 0 else None
+            return _run_crispasr(
+                binary=CRISPASR_BINARY,
+                model_path=self._settings.model_path,
+                audio_path=audio_path,
+                model_name=self._settings.model_name,
             )
-            return float(free_bytes) / (1024.0**3), total_gib, str(gpu_name) if gpu_name else None
-        except Exception as exc:
-            logger.warning("Unable to inspect available CUDA memory: %s", exc)
-            return None, None, None
+        finally:
+            release_memory_to_os()
 
-    def _transcribe_chunked(
-        self,
-        *,
-        model: Any,
-        audio_path: Path,
-        chunk_seconds: int,
-    ) -> dict[str, Any]:
-        info = sf.info(str(audio_path))
-        sample_rate = int(info.samplerate)
-        total_frames = int(info.frames)
-        chunk_frames = max(1, int(sample_rate * chunk_seconds))
-        overlap_frames = max(0, int(sample_rate * self._settings.cuda_chunk_overlap_seconds))
-
-        if total_frames <= chunk_frames:
-            raw = model.transcribe([str(audio_path)], timestamps=True)
-            return self._normalize_raw_result(raw)
-
-        chunks: list[tuple[float, dict[str, Any]]] = []
-        with tempfile.TemporaryDirectory(prefix="parakeetx-chunks-", dir=str(audio_path.parent)) as tmpdir:
-            chunk_dir = Path(tmpdir)
-            start_frame = 0
-            chunk_index = 0
-
-            while start_frame < total_frames:
-                end_frame = min(total_frames, start_frame + chunk_frames)
-                audio_chunk, _ = sf.read(
-                    str(audio_path),
-                    start=start_frame,
-                    stop=end_frame,
-                    dtype="float32",
-                    always_2d=False,
-                )
-                if audio_chunk.size == 0:
-                    break
-
-                chunk_path = chunk_dir / f"chunk_{chunk_index:04d}.wav"
-                sf.write(
-                    str(chunk_path),
-                    np.asarray(audio_chunk, dtype=np.float32),
-                    sample_rate,
-                    format="WAV",
-                    subtype="PCM_16",
-                )
-
-                raw_chunk = model.transcribe([str(chunk_path)], timestamps=True)
-                try:
-                    chunk_payload = self._normalize_raw_result(raw_chunk)
-                    chunk_offset_seconds = float(start_frame) / float(sample_rate)
-                    chunks.append((chunk_offset_seconds, chunk_payload))
-                finally:
-                    del raw_chunk
-
-                if end_frame >= total_frames:
-                    break
-
-                next_start = end_frame - overlap_frames
-                if next_start <= start_frame:
-                    next_start = end_frame
-                start_frame = next_start
-                chunk_index += 1
-
-        return self._merge_chunk_payloads(chunks)
-
-    def _merge_chunk_payloads(
-        self,
-        chunks: list[tuple[float, dict[str, Any]]],
-    ) -> dict[str, Any]:
-        merged_words: list[dict[str, Any]] = []
-        merged_segments: list[dict[str, Any]] = []
-        text_parts: list[str] = []
-        segment_id = 0
-
-        for offset_seconds, payload in chunks:
-            text = str(payload.get("text", "")).strip()
-            if text:
-                text_parts.append(text)
-
-            for word in payload.get("words", []):
-                merged_words.append(
-                    {
-                        "word": str(word.get("word", "")),
-                        "start": _safe_float(word.get("start", 0.0)) + offset_seconds,
-                        "end": _safe_float(word.get("end", 0.0)) + offset_seconds,
-                        "confidence": word.get("confidence"),
-                    }
-                )
-
-            for segment in payload.get("segments", []):
-                merged_segments.append(
-                    {
-                        "id": segment_id,
-                        "start": _safe_float(segment.get("start", 0.0)) + offset_seconds,
-                        "end": _safe_float(segment.get("end", 0.0)) + offset_seconds,
-                        "text": str(segment.get("text") or ""),
-                    }
-                )
-                segment_id += 1
-
-        return {
-            "text": " ".join(part for part in text_parts if part).strip(),
-            "words": merged_words,
-            "segments": merged_segments,
-            "language": "en",
-            "model": self._settings.model_name,
-        }
-
-    def _normalize_raw_result(self, raw: Any) -> dict[str, Any]:
-        item = _first_transcript_item(raw)
-
-        text = ""
-        words: list[dict[str, Any]] = []
-        segments: list[dict[str, Any]] = []
-
-        if isinstance(item, str):
-            text = item
-        elif isinstance(item, dict):
-            text = str(item.get("text", ""))
-            words = [self._normalize_word(w) for w in item.get("words", [])]
-            segments = [self._normalize_segment(s) for s in item.get("segments", [])]
-
-            timestamps = _transcript_timestamps(item)
-            if timestamps:
-                if not words:
-                    words = [self._normalize_word(w) for w in timestamps.get("word", [])]
-                if not segments:
-                    segments = [
-                        self._normalize_segment(s)
-                        for s in timestamps.get("segment", [])
-                    ]
-        elif item is not None:
-            # NeMo commonly returns Hypothesis objects when timestamps=True.
-            # Their text/timing lives on attributes rather than dict keys.
-            text = str(_get_field(item, "text", default="") or "")
-            timestamps = _transcript_timestamps(item)
-            if timestamps:
-                words = [self._normalize_word(w) for w in timestamps.get("word", [])]
-                segments = [
-                    self._normalize_segment(s)
-                    for s in timestamps.get("segment", [])
-                ]
-
-            if not words:
-                raw_words = _get_field(item, "words", default=[])
-                if isinstance(raw_words, list):
-                    words = [self._normalize_word(w) for w in raw_words]
-
-        if not segments and text:
-            end = words[-1]["end"] if words else 0.0
-            segments = [{"id": 0, "start": 0.0, "end": end, "text": text}]
-
-        return {
-            "text": text,
-            "words": words,
-            "segments": segments,
-            "language": "en",
-            "model": self._settings.model_name,
-        }
-
-    def _normalize_word(self, word: Any) -> dict[str, Any]:
-        if not isinstance(word, dict):
-            return {
-                "word": str(_get_field(word, "word", "text", default=word) or ""),
-                "start": _safe_float(_get_field(word, "start", default=0.0)),
-                "end": _safe_float(_get_field(word, "end", default=0.0)),
-                "confidence": _get_field(word, "confidence", default=None),
-            }
-
-        start = _safe_float(word.get("start", word.get("start_offset", 0.0)))
-        return {
-            "word": str(word.get("word") or word.get("text") or ""),
-            "start": start,
-            "end": _safe_float(word.get("end", word.get("end_offset", start))),
-            "confidence": word.get("confidence"),
-        }
-
-    def _normalize_segment(self, segment: Any) -> dict[str, Any]:
-        if not isinstance(segment, dict):
-            return {
-                "id": int(_safe_float(_get_field(segment, "id", default=0))),
-                "start": _safe_float(_get_field(segment, "start", default=0.0)),
-                "end": _safe_float(_get_field(segment, "end", default=0.0)),
-                "text": str(
-                    _get_field(segment, "text", "sentence", "segment", default=segment) or ""
-                ),
-            }
-
-        start = _safe_float(segment.get("start", segment.get("start_offset", 0.0)))
-        return {
-            "id": int(segment.get("id", 0)),
-            "start": start,
-            "end": _safe_float(segment.get("end", segment.get("end_offset", start))),
-            "text": str(
-                segment.get("text")
-                or segment.get("sentence")
-                or segment.get("segment")
-                or ""
-            ),
-        }
+    def _validate_runtime(self) -> None:
+        binary_path = _resolve_binary(CRISPASR_BINARY)
+        if binary_path is None:
+            raise RuntimeError(
+                "CrispASR binary was not found on PATH. Install CrispASR and ensure `crispasr` is executable."
+            )
+        if not self._settings.model_path.is_file():
+            raise RuntimeError(
+                f"Parakeet GGUF model file not found at {self._settings.model_path}. "
+                "Place parakeet-tdt-0.6b-v3-q8_0.gguf at /models before starting the API."
+            )
 
 
-def _first_transcript_item(raw: Any) -> Any:
-    item = raw
-    while isinstance(item, (list, tuple)) and item:
-        item = item[0]
-    return item
+def _run_crispasr(
+    *,
+    binary: str,
+    model_path: Path,
+    audio_path: Path,
+    model_name: str,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="parakeetx-crispasr-") as tmpdir:
+        output_base = Path(tmpdir) / "transcript"
+        args = _build_crispasr_args(
+            binary=binary,
+            model_path=model_path,
+            audio_path=audio_path,
+            output_base=output_base,
+        )
+        env = os.environ.copy()
+        env["CRISPASR_GGUF_MMAP"] = "1"
+
+        completed = subprocess.run(
+            args,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=CRISPASR_TIMEOUT_SECONDS,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "CrispASR transcription failed "
+                f"(exit={completed.returncode}, stdout={_safe_process_text(completed.stdout)}, "
+                f"stderr={_safe_process_text(completed.stderr)})"
+            )
+
+        json_path = output_base.with_suffix(".json")
+        if not json_path.is_file():
+            raise RuntimeError(f"CrispASR did not write expected JSON output: {json_path}")
+
+        try:
+            raw_payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"CrispASR wrote invalid JSON output: {json_path}") from exc
+
+    return _normalize_crispasr_payload(raw_payload, model_name=model_name)
 
 
-def _transcript_timestamps(item: Any) -> dict[str, Any]:
-    for field in ("timestamps", "timestamp", "timestep"):
-        timestamps = _get_field(item, field, default=None)
-        if isinstance(timestamps, dict):
-            return timestamps
-    return {}
+def _build_crispasr_args(
+    *,
+    binary: str,
+    model_path: Path,
+    audio_path: Path,
+    output_base: Path,
+) -> list[str]:
+    args = [
+        binary,
+        "--backend",
+        "parakeet",
+        "-m",
+        str(model_path),
+        "-f",
+        str(audio_path),
+        "-ojf",
+        "-of",
+        str(output_base),
+        "-np",
+    ]
+    gpu_backend = os.environ.get("CRISPASR_GPU_BACKEND", "").strip()
+    if gpu_backend:
+        args.extend(["--gpu-backend", gpu_backend])
+    return args
 
 
-def _get_field(item: Any, *names: str, default: Any = None) -> Any:
-    if isinstance(item, dict):
-        for name in names:
-            if name in item:
-                return item[name]
-        return default
+def _normalize_crispasr_payload(payload: Any, *, model_name: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("CrispASR JSON output must be an object.")
 
-    for name in names:
-        if hasattr(item, name):
-            return getattr(item, name)
+    if isinstance(payload.get("transcription"), list):
+        return _normalize_crispasr_transcription_payload(payload, model_name=model_name)
+
+    text = str(
+        payload.get("text")
+        or payload.get("transcript")
+        or payload.get("transcription")
+        or ""
+    )
+    language = str(payload.get("language") or payload.get("lang") or "en")
+    words = [_normalize_word(item) for item in _coerce_list(payload.get("words") or payload.get("tokens"))]
+    segments = [
+        _normalize_segment(item, index=index)
+        for index, item in enumerate(
+            _coerce_list(payload.get("segments") or payload.get("chunks") or payload.get("sentences"))
+        )
+    ]
+
+    if not segments and text:
+        end = words[-1]["end"] if words else 0.0
+        segments = [{"id": 0, "start": 0.0, "end": end, "text": text}]
+
+    return {
+        "text": text,
+        "language": language,
+        "model": model_name,
+        "words": words,
+        "segments": segments,
+    }
+
+
+def _normalize_crispasr_transcription_payload(
+    payload: dict[str, Any],
+    *,
+    model_name: str,
+) -> dict[str, Any]:
+    metadata = payload.get("crispasr")
+    language = "en"
+    if isinstance(metadata, dict):
+        language = str(metadata.get("language") or metadata.get("lang") or "en")
+
+    words: list[dict[str, Any]] = []
+    segments: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+
+    for index, item in enumerate(_coerce_list(payload.get("transcription"))):
+        if not isinstance(item, dict):
+            continue
+
+        segment = _normalize_transcription_segment(item, index=index)
+        if segment["text"]:
+            text_parts.append(segment["text"])
+        segments.append(segment)
+
+        for word in _coerce_list(item.get("words")):
+            words.append(_normalize_word(word))
+
+    text = str(payload.get("text") or " ".join(text_parts)).strip()
+    return {
+        "text": text,
+        "language": language,
+        "model": model_name,
+        "words": words,
+        "segments": segments,
+    }
+
+
+def _normalize_transcription_segment(segment: dict[str, Any], *, index: int) -> dict[str, Any]:
+    offsets = segment.get("offsets")
+    if isinstance(offsets, dict):
+        start = _timestamp_milliseconds(offsets.get("from", 0.0))
+        end = _timestamp_milliseconds(offsets.get("to", start * 1000.0))
+    else:
+        start = _timestamp_seconds(_first_present(segment, "start", "start_time", "t0"), default=0.0)
+        end = _segment_end_seconds(segment, default=start)
+
+    return {
+        "id": index,
+        "start": start,
+        "end": end,
+        "text": str(segment.get("text") or ""),
+    }
+
+
+def _normalize_word(word: Any) -> dict[str, Any]:
+    if not isinstance(word, dict):
+        return {"word": str(word), "start": 0.0, "end": 0.0, "confidence": None}
+
+    start = _timestamp_seconds(_first_present(word, "start", "start_time", "t0"), default=0.0)
+    if start == 0.0 and _first_present(word, "start_ms") is not None:
+        start = _timestamp_milliseconds(word.get("start_ms"))
+    return {
+        "word": str(word.get("word") or word.get("text") or word.get("token") or ""),
+        "start": start,
+        "end": _word_end_seconds(word, default=start),
+        "confidence": word.get("confidence", word.get("score")),
+    }
+
+
+def _normalize_segment(segment: Any, *, index: int) -> dict[str, Any]:
+    if not isinstance(segment, dict):
+        return {"id": index, "start": 0.0, "end": 0.0, "text": str(segment)}
+
+    start = _timestamp_seconds(_first_present(segment, "start", "start_time", "t0"), default=0.0)
+    if start == 0.0 and _first_present(segment, "start_ms") is not None:
+        start = _timestamp_milliseconds(segment.get("start_ms"))
+    return {
+        "id": int(_safe_float(segment.get("id", index), float(index))),
+        "start": start,
+        "end": _segment_end_seconds(segment, default=start),
+        "text": str(segment.get("text") or segment.get("sentence") or segment.get("segment") or ""),
+    }
+
+
+def _word_end_seconds(word: dict[str, Any], *, default: float) -> float:
+    value = _first_present(word, "end", "end_time", "t1")
+    if value is not None:
+        return _timestamp_seconds(value, default=default)
+    if _first_present(word, "end_ms") is not None:
+        return _timestamp_milliseconds(word.get("end_ms"))
     return default
 
 
-def _chunk_seconds_for_available_gib(available_gib: float) -> int:
-    if available_gib >= 6.0:
-        return 600
-    if available_gib >= 4.5:
-        return 450
-    if available_gib >= 3.0:
-        return 300
-    if available_gib >= 1.5:
-        return 150
-    return 90
+def _segment_end_seconds(segment: dict[str, Any], *, default: float) -> float:
+    value = _first_present(segment, "end", "end_time", "t1")
+    if value is not None:
+        return _timestamp_seconds(value, default=default)
+    if _first_present(segment, "end_ms") is not None:
+        return _timestamp_milliseconds(segment.get("end_ms"))
+    return default
 
 
-def _audio_duration_seconds(audio_path: Path) -> float:
+def _first_present(payload: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _timestamp_seconds(value: Any, *, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.endswith("ms"):
+            return _safe_float(stripped[:-2]) / 1000.0
+        if stripped.endswith("s"):
+            return _safe_float(stripped[:-1])
+        value = stripped
+
+    numeric = _safe_float(value, default)
+    if numeric > 10_000:
+        return numeric / 1000.0
+    return numeric
+
+
+def _timestamp_milliseconds(value: Any) -> float:
+    return _safe_float(value) / 1000.0
+
+
+def _coerce_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _resolve_binary(binary: str) -> str | None:
+    return shutil.which(binary)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(sf.info(str(audio_path)).duration)
-    except Exception:
-        return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
-def _fmt_gib(value: Any) -> str:
-    if isinstance(value, (int, float)):
-        return f"{float(value):.2f}"
-    return "n/a"
-
-
-def _ensure_extracted_nemo_cache(
-    nemo_file: Path,
-    *,
-    SaveRestoreConnector: Any,
-) -> Path:
-    extracted_dir = nemo_file.with_name(f"{nemo_file.name}.extracted")
-    if _is_extracted_nemo_dir_complete(extracted_dir):
-        return extracted_dir
-
-    tmpdir = extracted_dir.with_name(f"{extracted_dir.name}.tmp")
-    if tmpdir.exists():
-        shutil.rmtree(tmpdir)
-    tmpdir.mkdir(parents=True)
-    try:
-        SaveRestoreConnector._unpack_nemo_file(str(nemo_file), str(tmpdir))
-        if not _is_extracted_nemo_dir_complete(tmpdir):
-            raise RuntimeError(f"Extracted NeMo cache is incomplete: {tmpdir}")
-        if extracted_dir.exists():
-            shutil.rmtree(extracted_dir)
-        tmpdir.rename(extracted_dir)
-    except Exception:
-        if tmpdir.exists():
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        raise
-
-    logger.info("Prepared extracted NeMo cache at %s.", extracted_dir)
-    return extracted_dir
-
-
-def _is_extracted_nemo_dir_complete(path: Path) -> bool:
-    return (
-        path.is_dir()
-        and (path / "model_config.yaml").is_file()
-        and (path / "model_weights.ckpt").is_file()
-    )
-
-
-def _build_save_restore_connector(
-    SaveRestoreConnector: Any,
-    *,
-    torch_load_mmap: bool,
-) -> Any:
-    if not torch_load_mmap:
-        return SaveRestoreConnector()
-
-    class MMapSaveRestoreConnector(SaveRestoreConnector):
-        @staticmethod
-        def _load_state_dict_from_disk(model_weights, map_location="cpu"):
-            import torch
-
-            try:
-                return torch.load(
-                    model_weights,
-                    map_location=map_location,
-                    weights_only=True,
-                    mmap=True,
-                )
-            except TypeError:
-                return torch.load(
-                    model_weights,
-                    map_location=map_location,
-                    weights_only=True,
-                )
-
-    return MMapSaveRestoreConnector()
+def _safe_process_text(value: str | None, *, limit: int = 2000) -> str:
+    text = (value or "").strip()
+    if len(text) > limit:
+        return f"{text[:limit]}...[truncated]"
+    return text

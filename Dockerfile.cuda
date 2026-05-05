@@ -1,5 +1,21 @@
 # syntax=docker/dockerfile:1.7
 
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 AS crispasr-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG CRISPASR_REF=v0.5.7
+ARG CRISPASR_CUDA_ARCHITECTURES=89-real;120-real
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git cmake build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${CRISPASR_REF}" https://github.com/CrispStrobe/CrispASR.git .
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES="${CRISPASR_CUDA_ARCHITECTURES}" \
+    && cmake --build build -j"$(nproc)" --target crispasr-cli \
+    && cp build/bin/crispasr /usr/local/bin/crispasr
+
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -24,7 +40,7 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    uv sync --frozen --no-dev --no-install-project --extra nemo --extra diarization --extra cuda \
+    uv sync --frozen --no-dev --no-install-project --extra diarization --extra cuda \
     --no-install-package torch \
     --no-install-package torchaudio
 
@@ -48,11 +64,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libsndfile1 ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates curl libsndfile1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /root/.local/share/uv/python /root/.local/share/uv/python
+COPY --from=crispasr-builder /usr/local/bin/crispasr /usr/local/bin/crispasr
+RUN mkdir -p /models \
+    && curl -fsSL -o /models/parakeet-tdt-0.6b-v3-q8_0.gguf \
+    https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF/resolve/main/parakeet-tdt-0.6b-v3-q8_0.gguf
 COPY src ./src
 
 EXPOSE 7474

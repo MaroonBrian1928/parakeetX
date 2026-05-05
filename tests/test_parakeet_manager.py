@@ -1,313 +1,201 @@
 from __future__ import annotations
 
-import sys
-import types
+import json
+import subprocess
 from pathlib import Path
 
-import numpy as np
 import pytest
-import soundfile as sf
 
 from parakeetx_api_server.config import ParakeetSettings
+from parakeetx_api_server.model_managers import parakeet_manager as manager_module
 from parakeetx_api_server.model_managers.parakeet_manager import (
     ParakeetModelManager,
-    _build_save_restore_connector,
-    _ensure_extracted_nemo_cache,
-    _is_extracted_nemo_dir_complete,
-    _chunk_seconds_for_available_gib,
+    _build_crispasr_args,
+    _normalize_crispasr_payload,
 )
 
 
-def _write_silent_wav(path: Path, *, duration_seconds: float, sample_rate: int = 16_000) -> None:
-    frames = max(1, int(duration_seconds * sample_rate))
-    samples = np.zeros(frames, dtype=np.float32)
-    sf.write(str(path), samples, sample_rate, format="WAV", subtype="PCM_16")
+def test_build_crispasr_args_uses_canonical_parakeet_shape(tmp_path: Path) -> None:
+    audio_path = tmp_path / "normalized.wav"
+    output_base = tmp_path / "transcript"
 
-
-def test_chunk_seconds_for_available_gib_thresholds() -> None:
-    assert _chunk_seconds_for_available_gib(1.4) == 90
-    assert _chunk_seconds_for_available_gib(1.5) == 150
-    assert _chunk_seconds_for_available_gib(3.0) == 300
-    assert _chunk_seconds_for_available_gib(4.5) == 450
-    assert _chunk_seconds_for_available_gib(6.0) == 600
-    assert _chunk_seconds_for_available_gib(24.0) == 600
-
-
-def test_resolve_chunk_seconds_uses_available_cuda_memory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    audio_path = tmp_path / "audio.wav"
-    _write_silent_wav(audio_path, duration_seconds=600.0)
-
-    settings = ParakeetSettings(
-        device="cuda",
-        cuda_adaptive_chunking=True,
-        cuda_chunk_min_seconds=30,
-        cuda_chunk_max_seconds=1200,
-    )
-    manager = ParakeetModelManager(settings)
-    monkeypatch.setattr(manager, "_available_cuda_memory_gib", lambda: 5.5)
-    monkeypatch.setattr(
-        manager,
-        "_cuda_memory_snapshot",
-        lambda: (5.5, 12.0, "NVIDIA GeForce GTX TITAN X"),
+    args = _build_crispasr_args(
+        binary="crispasr",
+        model_path=Path("/models/parakeet-tdt-0.6b-v3-q8_0.gguf"),
+        audio_path=audio_path,
+        output_base=output_base,
     )
 
-    assert manager._resolve_chunk_seconds(audio_path) == 450
+    assert args == [
+        "crispasr",
+        "--backend",
+        "parakeet",
+        "-m",
+        "/models/parakeet-tdt-0.6b-v3-q8_0.gguf",
+        "-f",
+        str(audio_path),
+        "-ojf",
+        "-of",
+        str(output_base),
+        "-np",
+    ]
 
 
-def test_resolve_chunk_seconds_default_cap_keeps_modern_cuda_chunks_conservative(
+def test_build_crispasr_args_can_force_gpu_backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    audio_path = tmp_path / "audio.wav"
-    _write_silent_wav(audio_path, duration_seconds=1558.0)
+    monkeypatch.setenv("CRISPASR_GPU_BACKEND", "cuda")
 
-    settings = ParakeetSettings(
-        device="cuda",
-        cuda_adaptive_chunking=True,
-    )
-    manager = ParakeetModelManager(settings)
-    monkeypatch.setattr(
-        manager,
-        "_cuda_memory_snapshot",
-        lambda: (9.92, 15.92, "NVIDIA GeForce RTX 5070 Ti"),
+    args = _build_crispasr_args(
+        binary="crispasr",
+        model_path=Path("/models/model.gguf"),
+        audio_path=tmp_path / "normalized.wav",
+        output_base=tmp_path / "transcript",
     )
 
-    assert manager._resolve_chunk_seconds(audio_path) == 600
+    assert args[-2:] == ["--gpu-backend", "cuda"]
 
 
-def test_transcribe_chunked_merges_offsets(tmp_path: Path) -> None:
-    audio_path = tmp_path / "audio.wav"
-    _write_silent_wav(audio_path, duration_seconds=5.0)
-
-    settings = ParakeetSettings(
-        device="cuda",
-        cuda_adaptive_chunking=True,
-        cuda_chunk_seconds_override=2,
-        cuda_chunk_overlap_seconds=0.0,
-    )
-    manager = ParakeetModelManager(settings)
-
-    class FakeModel:
-        def __init__(self) -> None:
-            self.calls: list[str] = []
-
-        def transcribe(self, audio_paths, timestamps=True):
-            _ = timestamps
-            name = Path(audio_paths[0]).name
-            self.calls.append(name)
-            if name == "chunk_0000.wav":
-                return {
-                    "text": "hello",
-                    "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
-                    "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "hello"}],
-                }
-            if name == "chunk_0001.wav":
-                return {
-                    "text": "world",
-                    "words": [{"word": "world", "start": 0.0, "end": 0.5}],
-                    "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "world"}],
-                }
-            if name == "chunk_0002.wav":
-                return {
-                    "text": "again",
-                    "words": [{"word": "again", "start": 0.0, "end": 0.5}],
-                    "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "again"}],
-                }
-            return {"text": "fallback", "words": [], "segments": []}
-
-    fake_model = FakeModel()
-    manager._model = fake_model
-
-    payload = manager.transcribe(audio_path)
-
-    assert payload["text"] == "hello world again"
-    assert [segment["id"] for segment in payload["segments"]] == [0, 1, 2]
-    assert payload["segments"][0]["start"] == pytest.approx(0.0)
-    assert payload["segments"][1]["start"] == pytest.approx(2.0)
-    assert payload["segments"][2]["start"] == pytest.approx(4.0)
-    assert payload["words"][0]["start"] == pytest.approx(0.0)
-    assert payload["words"][1]["start"] == pytest.approx(2.0)
-    assert payload["words"][2]["start"] == pytest.approx(4.0)
-    assert fake_model.calls == ["chunk_0000.wav", "chunk_0001.wav", "chunk_0002.wav"]
-
-
-def test_normalize_raw_result_handles_nemo_hypothesis_object() -> None:
-    settings = ParakeetSettings()
-    manager = ParakeetModelManager(settings)
-
-    hypothesis = types.SimpleNamespace(
-        text="hello world",
-        timestamp={
-            "word": [
-                {"word": "hello", "start": 0.1, "end": 0.4},
-                {"word": "world", "start": 0.5, "end": 0.9},
+def test_normalize_crispasr_payload_maps_words_segments_and_language() -> None:
+    payload = _normalize_crispasr_payload(
+        {
+            "text": "hello world",
+            "language": "en",
+            "words": [
+                {"word": "hello", "start_ms": 100, "end_ms": 400, "score": 0.91},
+                {"text": "world", "start": "0.50s", "end": "900ms"},
             ],
-            "segment": [
-                {"segment": "hello world", "start": 0.1, "end": 0.9},
+            "segments": [
+                {"start_ms": 100, "end_ms": 900, "text": "hello world"},
             ],
         },
+        model_name="cstr/parakeet-tdt-0.6b-v3-GGUF",
     )
 
-    payload = manager._normalize_raw_result([hypothesis])
+    assert payload == {
+        "text": "hello world",
+        "language": "en",
+        "model": "cstr/parakeet-tdt-0.6b-v3-GGUF",
+        "words": [
+            {"word": "hello", "start": 0.1, "end": 0.4, "confidence": 0.91},
+            {"word": "world", "start": 0.5, "end": 0.9, "confidence": None},
+        ],
+        "segments": [
+            {"id": 0, "start": 0.1, "end": 0.9, "text": "hello world"},
+        ],
+    }
+
+
+def test_normalize_crispasr_documented_transcription_layout() -> None:
+    payload = _normalize_crispasr_payload(
+        {
+            "crispasr": {"backend": "parakeet", "language": "en"},
+            "transcription": [
+                {
+                    "offsets": {"from": 240, "to": 10880},
+                    "text": "hello world",
+                    "words": [
+                        {"word": "hello", "start_ms": 240, "end_ms": 640},
+                    ],
+                }
+            ],
+        },
+        model_name="cstr/parakeet-tdt-0.6b-v3-GGUF",
+    )
 
     assert payload["text"] == "hello world"
+    assert payload["language"] == "en"
+    assert payload["segments"] == [
+        {"id": 0, "start": 0.24, "end": 10.88, "text": "hello world"}
+    ]
     assert payload["words"] == [
-        {"word": "hello", "start": 0.1, "end": 0.4, "confidence": None},
-        {"word": "world", "start": 0.5, "end": 0.9, "confidence": None},
-    ]
-    assert payload["segments"] == [
-        {"id": 0, "start": 0.1, "end": 0.9, "text": "hello world"},
+        {"word": "hello", "start": 0.24, "end": 0.64, "confidence": None}
     ]
 
 
-def test_normalize_raw_result_unwraps_nested_nemo_result() -> None:
-    settings = ParakeetSettings()
-    manager = ParakeetModelManager(settings)
+def test_load_model_validates_missing_binary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"gguf")
+    monkeypatch.setattr(manager_module, "_resolve_binary", lambda binary: None)
 
-    hypothesis = types.SimpleNamespace(text="nested transcript", timestamp={})
+    manager = ParakeetModelManager(ParakeetSettings(model_path=model_path))
 
-    payload = manager._normalize_raw_result([[hypothesis]])
-
-    assert payload["text"] == "nested transcript"
-    assert payload["segments"] == [
-        {"id": 0, "start": 0.0, "end": 0.0, "text": "nested transcript"},
-    ]
+    with pytest.raises(RuntimeError, match="CrispASR binary was not found"):
+        manager.load_model()
 
 
-def test_configure_cuda_runtime_moves_model_and_enables_half(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = ParakeetSettings(device="cuda", cuda_half_precision=True)
-    manager = ParakeetModelManager(settings)
+def test_load_model_validates_missing_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(manager_module, "_resolve_binary", lambda binary: "/usr/bin/crispasr")
 
-    class FakeModel:
-        def __init__(self) -> None:
-            self.moved_to = None
-            self.half_called = False
+    manager = ParakeetModelManager(ParakeetSettings(model_path=tmp_path / "missing.gguf"))
 
-        def to(self, device):
-            self.moved_to = device
-            return self
-
-        def half(self):
-            self.half_called = True
-            return self
-
-    fake_torch = types.SimpleNamespace(device=lambda value: f"device:{value}")
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-
-    model = FakeModel()
-    manager._configure_cuda_runtime(model)
-
-    assert model.moved_to == "device:cuda"
-    assert model.half_called is True
+    with pytest.raises(RuntimeError, match="Parakeet GGUF model file not found"):
+        manager.load_model()
 
 
-def test_log_chunk_plan_emits_one_line(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
-    audio_path = tmp_path / "audio.wav"
-    _write_silent_wav(audio_path, duration_seconds=30.0)
+def test_transcribe_injects_mmap_env_and_reads_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "model.gguf"
+    audio_path = tmp_path / "normalized.wav"
+    model_path.write_bytes(b"gguf")
+    audio_path.write_bytes(b"wav")
+    seen_env = {}
+    seen_args = []
 
-    settings = ParakeetSettings(device="cuda", cuda_adaptive_chunking=True)
-    manager = ParakeetModelManager(settings)
-    caplog.set_level("INFO")
-    manager._log_chunk_plan(
-        audio_path,
-        {
-            "chunk_seconds": 60,
-            "reason": "adaptive",
-            "duration_seconds": 30.0,
-            "chunk_policy": "default",
-            "gpu_name": "NVIDIA RTX 3070",
-            "free_gib": 7.2,
-            "total_gib": 8.0,
-        },
-    )
+    monkeypatch.setattr(manager_module, "_resolve_binary", lambda binary: "/usr/bin/crispasr")
 
-    assert "ASR request chunk plan" in caplog.text
-    assert "chunk_seconds=60" in caplog.text
+    def fake_run(args, *, env, check, capture_output, text, timeout):
+        _ = check
+        _ = capture_output
+        _ = text
+        _ = timeout
+        seen_args.extend(args)
+        seen_env.update(env)
+        output_base = Path(args[args.index("-of") + 1])
+        output_base.with_suffix(".json").write_text(
+            json.dumps({"text": "hello", "words": [], "segments": []}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
+    monkeypatch.setattr(manager_module.subprocess, "run", fake_run)
 
-def test_process_isolated_parakeet_manager_delegates_to_worker(tmp_path: Path) -> None:
-    audio_path = tmp_path / "audio.wav"
-    _write_silent_wav(audio_path, duration_seconds=1.0)
+    manager = ParakeetModelManager(ParakeetSettings(model_path=model_path))
+    payload = manager.transcribe(audio_path)
 
-    class FakeWorker:
-        def __init__(self) -> None:
-            self.unloaded = False
-
-        def parakeet_status(self):
-            return {
-                "loaded": False,
-                "model_name": "nvidia/parakeet-tdt-0.6b-v2",
-                "device": "cuda",
-                "idle_evict_minutes": None,
-            }
-
-        def transcribe_parakeet(self, path, *, language):
-            assert path == audio_path
-            assert language is None
-            return {"text": "hello", "words": [], "segments": [], "language": "en"}
-
-        def unload_parakeet(self):
-            self.unloaded = True
-            return self.parakeet_status()
-
-    worker = FakeWorker()
-    manager = ParakeetModelManager(
-        ParakeetSettings(device="cuda"),
-        idle_evict_minutes=1,
-        worker_client=worker,
-    )
-
-    assert manager.transcribe(audio_path)["text"] == "hello"
-    assert manager.status()["idle_evict_minutes"] == 1
-    manager.unload_model()
-    assert worker.unloaded is True
+    assert seen_env["CRISPASR_GGUF_MMAP"] == "1"
+    assert "--backend" in seen_args
+    assert "-ojf" in seen_args
+    assert "-np" in seen_args
+    assert str(model_path) in seen_args
+    assert str(audio_path) in seen_args
+    assert payload["text"] == "hello"
 
 
-def test_ensure_extracted_nemo_cache_reuses_complete_directory(tmp_path: Path) -> None:
-    nemo_file = tmp_path / "model.nemo"
-    nemo_file.write_bytes(b"fake")
-    extracted = tmp_path / "model.nemo.extracted"
-    extracted.mkdir()
-    (extracted / "model_config.yaml").write_text("model: {}\n")
-    (extracted / "model_weights.ckpt").write_bytes(b"weights")
+def test_transcribe_failure_includes_process_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "model.gguf"
+    audio_path = tmp_path / "normalized.wav"
+    model_path.write_bytes(b"gguf")
+    audio_path.write_bytes(b"wav")
+    monkeypatch.setattr(manager_module, "_resolve_binary", lambda binary: "/usr/bin/crispasr")
 
-    class FakeConnector:
-        called = False
+    def fake_run(args, **kwargs):
+        _ = kwargs
+        return subprocess.CompletedProcess(args, 2, stdout="out text", stderr="err text")
 
-        @staticmethod
-        def _unpack_nemo_file(path2file: str, out_folder: str) -> str:
-            _ = path2file
-            _ = out_folder
-            FakeConnector.called = True
-            return out_folder
+    monkeypatch.setattr(manager_module.subprocess, "run", fake_run)
 
-    assert _ensure_extracted_nemo_cache(nemo_file, SaveRestoreConnector=FakeConnector) == extracted
-    assert FakeConnector.called is False
+    manager = ParakeetModelManager(ParakeetSettings(model_path=model_path))
 
+    with pytest.raises(RuntimeError) as exc_info:
+        manager.transcribe(audio_path)
 
-def test_ensure_extracted_nemo_cache_extracts_when_missing(tmp_path: Path) -> None:
-    nemo_file = tmp_path / "model.nemo"
-    nemo_file.write_bytes(b"fake")
-
-    class FakeConnector:
-        @staticmethod
-        def _unpack_nemo_file(path2file: str, out_folder: str) -> str:
-            _ = path2file
-            out = Path(out_folder)
-            (out / "model_config.yaml").write_text("model: {}\n")
-            (out / "model_weights.ckpt").write_bytes(b"weights")
-            return out_folder
-
-    extracted = _ensure_extracted_nemo_cache(nemo_file, SaveRestoreConnector=FakeConnector)
-
-    assert extracted == tmp_path / "model.nemo.extracted"
-    assert _is_extracted_nemo_dir_complete(extracted)
-
-
-def test_build_save_restore_connector_can_disable_mmap() -> None:
-    class FakeConnector:
-        pass
-
-    connector = _build_save_restore_connector(FakeConnector, torch_load_mmap=False)
-
-    assert type(connector) is FakeConnector
+    assert "CrispASR transcription failed" in str(exc_info.value)
+    assert "out text" in str(exc_info.value)
+    assert "err text" in str(exc_info.value)

@@ -1,11 +1,11 @@
 # ParakeetX API Server
 
-Standalone FastAPI transcription service inspired by WhisperX API conventions, backed by NVIDIA Parakeet (`nvidia/parakeet-tdt-0.6b-v2`) with optional pyannote diarization.
+Standalone FastAPI transcription service inspired by WhisperX API conventions, backed by Parakeet GGUF (`cstr/parakeet-tdt-0.6b-v3-GGUF`) through CrispASR with optional pyannote diarization.
 
 ## Features
 
 - `POST /v1/audio/transcriptions` with OpenAI-style multipart fields.
-- Native Parakeet timestamps (no Whisper forced-alignment stage).
+- Native Parakeet/CrispASR timestamps (no Whisper forced-alignment stage).
 - WhisperX-compatible word timestamp fields for downstream tools (`word_segments` and `segments[].words`).
 - Optional diarization via `pyannote/speaker-diarization-community-1` (`diarize=true`).
 - Speaker labels assigned to words/segments by maximum timestamp overlap.
@@ -125,17 +125,9 @@ Subtitle formats (`srt` / `vtt`) prefix cues with speaker labels when available.
 - `POST /v1/models/diarization/load`
 - `POST /v1/models/diarization/unload`
 
-CUDA unload attempts `torch.cuda.empty_cache()`.
-Model unload also runs Python GC and, on Linux, asks glibc to trim allocator arenas.
-Set `MODEL_PROCESS_ISOLATION=true` to run ASR/diarization model work in a child process. When both models are unloaded or idle-evicted, the worker exits so native PyTorch/NeMo/pyannote RSS can return to the OS instead of staying mapped in uvicorn.
-`PARAKEET__USE_EXTRACTED_NEMO_CACHE=false` by default because Parakeet's restore peak is dominated by checkpoint loading, and pre-extraction can increase first-load RSS.
-`PARAKEET__TORCH_LOAD_MMAP=false` by default; PyTorch mmap loading is available as an experiment, but it did not reduce the measured Parakeet restore peak on the CUDA legacy image.
-Set `UNLOAD_ASR_BEFORE_DIARIZATION=true` only if you want lower ASR/diarization overlap at the cost of forcing Parakeet to reload for the next request.
-When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
-Adaptive chunking uses a conservative memory-based ladder, caps chunks at 600 seconds by default, and logs the chosen chunk plan at transcription start.
-If CUDA reports `device not ready`, lower `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE` to a value such as `120` or reduce `PARAKEET__CUDA_CHUNK_MAX_SECONDS`.
-Maxwell/TITAN-era CUDA runs switch NeMo decoding from `greedy_batch` to `greedy` to avoid CUDA graph decoder compatibility failures while keeping ASR on GPU.
-The default CUDA Docker image uses a CUDA 12.8 runtime and PyTorch CUDA 12.8 wheels so RTX 50-series / Blackwell GPUs can run kernels for their newer compute capability.
+`POST /v1/models/parakeet/load` is a cheap validation endpoint: it checks that `crispasr` is executable and that `/models/parakeet-tdt-0.6b-v3-q8_0.gguf` exists. ASR has no resident Python model to unload, so `/unload` reports the same non-resident status after memory trimming.
+The ASR subprocess always sets `CRISPASR_GGUF_MMAP=1`, avoiding the old multi-GB NeMo checkpoint restore path and its duplicate weight allocation.
+CUDA/PyTorch remains relevant only for optional pyannote diarization images. If CUDA errors appear, they are diarization-side errors; set `DIARIZATION__DEVICE_CUDA=cpu` or use `diarize=false`.
 
 ## Environment Variables
 
@@ -144,25 +136,13 @@ Core env vars:
 - `API_KEY`
 - `HF_TOKEN`
 - `PARAKEET__MODEL_NAME`
-- `PARAKEET__DEVICE`
-- `PARAKEET__PRELOAD_MODEL`
-- `PARAKEET__LOCAL_FILES_ONLY`
-- `PARAKEET__CUDA_HALF_PRECISION`
-- `PARAKEET__CUDA_ADAPTIVE_CHUNKING`
-- `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE`
-- `PARAKEET__CUDA_CHUNK_MIN_SECONDS`
-- `PARAKEET__CUDA_CHUNK_MAX_SECONDS`
-- `PARAKEET__CUDA_CHUNK_OVERLAP_SECONDS`
-- `PARAKEET__USE_EXTRACTED_NEMO_CACHE`
-- `PARAKEET__TORCH_LOAD_MMAP`
+- `PARAKEET__MODEL_PATH`
 - `DIARIZATION__MODEL_NAME`
 - `DIARIZATION__DEVICE`
 - `DIARIZATION__PRELOAD_MODEL`
 - `MAX_CONCURRENT_TRANSCRIPTIONS`
 - `DEBUG_LOG_TRANSCRIPTION_PAYLOAD`
 - `MODEL_IDLE_EVICT_MINUTES`
-- `MODEL_PROCESS_ISOLATION`
-- `UNLOAD_ASR_BEFORE_DIARIZATION`
 - `UVICORN_HOST`
 - `UVICORN_PORT`
 
@@ -179,15 +159,18 @@ These are skipped by default in normal local tests.
 
 Published image tags:
 
-- `ghcr.io/maroonbrian1928/parakeetx:cpu`: CPU-only runtime.
-- `ghcr.io/maroonbrian1928/parakeetx:cuda`: CUDA 12.8 / PyTorch cu128 runtime for RTX 50-series / Blackwell and newer supported CUDA GPUs.
-- `ghcr.io/maroonbrian1928/parakeetx:cuda-legacy`: CUDA 12.4 / PyTorch cu118 runtime for older GPUs such as TITAN X / Maxwell that are not covered by newer PyTorch cu128 wheels.
+- `ghcr.io/maroonbrian1928/parakeetx:cpu`: GGUF ASR runtime without pyannote CUDA support.
+- `ghcr.io/maroonbrian1928/parakeetx:cuda`: GGUF ASR runtime plus CUDA 12.8 / PyTorch cu128 for pyannote diarization.
+- `ghcr.io/maroonbrian1928/parakeetx:cuda-legacy`: GGUF ASR runtime plus CUDA 12.4 / PyTorch cu118 for legacy pyannote diarization hosts.
 
 Build CPU image:
 
 ```bash
 docker compose -f compose.cpu.yaml build
 ```
+
+The CPU image installs the pinned official CrispASR CLI release (`v0.5.7`,
+`crispasr-linux-x86_64.tar.gz`) and verifies its SHA256 digest during build.
 
 Build CUDA image:
 
@@ -200,6 +183,11 @@ Build legacy CUDA image:
 ```bash
 docker compose -f compose.cuda-legacy.yaml build
 ```
+
+The CUDA images build the CrispASR CLI from the matching `v0.5.7` source tag
+with `GGML_CUDA=ON` because the `v0.5.7` Linux CLI release asset is CPU-only;
+the release includes Linux CUDA libraries, but no Linux CUDA CLI tarball for the
+subprocess path used by this API.
 
 Run CPU profile:
 
@@ -223,10 +211,9 @@ Default host port: `7474`.
 
 All Compose profiles use `HOST_PORT`. Only one profile can bind the default host port at a time. Override `HOST_PORT` when starting a second profile if you need multiple profiles running simultaneously.
 
-CUDA profile defaults are tuned for lower VRAM pressure:
+CUDA profile defaults are only for diarization:
 
-- `PARAKEET__DEVICE_CUDA=cuda`
 - `DIARIZATION__DEVICE_CUDA=cpu` when unset in `.env`
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 
-If you set `DIARIZATION__DEVICE_CUDA=cuda`, diarization will also run on the GPU and share VRAM with Parakeet.
+If you set `DIARIZATION__DEVICE_CUDA=cuda`, diarization will run on the GPU. ASR stays on the CrispASR/GGUF path.

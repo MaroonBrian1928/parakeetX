@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,31 +22,13 @@ def _none_if_blank_env(value: object) -> object:
 
 
 class ParakeetSettings(BaseModel):
-    model_name: str = "nvidia/parakeet-tdt-0.6b-v2"
-    device: str = "cpu"
-    preload_model: bool = False
-    local_files_only: bool = False
-    cuda_half_precision: bool = True
-    cuda_adaptive_chunking: bool = True
-    cuda_chunk_seconds_override: int | None = Field(default=None, ge=1)
-    cuda_chunk_min_seconds: int = Field(default=30, ge=1)
-    cuda_chunk_max_seconds: int = Field(default=600, ge=1)
-    cuda_chunk_overlap_seconds: float = Field(default=0.0, ge=0.0, le=10.0)
-    use_extracted_nemo_cache: bool = False
-    torch_load_mmap: bool = False
+    model_name: str = "cstr/parakeet-tdt-0.6b-v3-GGUF"
+    model_path: Path = Path("/models/parakeet-tdt-0.6b-v3-q8_0.gguf")
 
     @field_validator("*", mode="before")
     @classmethod
     def _strip_string_values(cls, value: object) -> object:
         return _strip_env_string(value)
-
-    @field_validator("cuda_chunk_seconds_override", mode="before")
-    @classmethod
-    def _empty_chunk_override_as_none(cls, value: object) -> object:
-        value = _none_if_blank_env(value)
-        if value == "0":
-            return None
-        return value
 
 
 class DiarizationSettings(BaseModel):
@@ -74,8 +58,6 @@ class Settings(BaseSettings):
     max_concurrent_transcriptions: int = 2
     debug_log_transcription_payload: bool = False
     model_idle_evict_minutes: float | None = Field(default=None, ge=0)
-    model_process_isolation: bool = False
-    unload_asr_before_diarization: bool = False
 
     uvicorn_host: str = "0.0.0.0"
     uvicorn_port: int = 7474

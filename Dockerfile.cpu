@@ -1,5 +1,21 @@
 # syntax=docker/dockerfile:1.7
 
+FROM debian:bookworm-slim AS crispasr-release
+
+ARG CRISPASR_VERSION=v0.5.7
+ARG CRISPASR_SHA256=9981f330a96715bdd232a08ca6d485305e7e0e95c1eb1b51ffac68424f14d311
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/crispasr
+RUN curl -fsSL -o crispasr.tar.gz \
+    "https://github.com/CrispStrobe/CrispASR/releases/download/${CRISPASR_VERSION}/crispasr-linux-x86_64.tar.gz" \
+    && echo "${CRISPASR_SHA256}  crispasr.tar.gz" | sha256sum -c - \
+    && tar -xzf crispasr.tar.gz --strip-components=1 \
+    && install -m 0755 crispasr /usr/local/bin/crispasr
+
 FROM python:3.12-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -28,10 +44,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libsndfile1 ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates curl libsndfile1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.venv /app/.venv
+COPY --from=crispasr-release /usr/local/bin/crispasr /usr/local/bin/crispasr
+RUN mkdir -p /models \
+    && curl -fsSL -o /models/parakeet-tdt-0.6b-v3-q8_0.gguf \
+    https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF/resolve/main/parakeet-tdt-0.6b-v3-q8_0.gguf
 COPY src ./src
 
 EXPOSE 7474

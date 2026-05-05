@@ -7,7 +7,6 @@ services:
     env_file:
       - .env
     environment:
-      PARAKEET__DEVICE: cpu
       DIARIZATION__DEVICE: cpu
     ports:
       - "${HOST_PORT:-7474}:${UVICORN_PORT:-7474}"
