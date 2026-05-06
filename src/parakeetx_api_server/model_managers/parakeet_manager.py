@@ -270,65 +270,86 @@ class ParakeetModelManager:
                 if model is None:
                     raise RuntimeError("Parakeet model failed to load")
 
-                chunk_paths: list[Path] = []
-                chunk_offsets: list[float] = []
-                with tempfile.TemporaryDirectory(prefix="parakeetx-vad-chunks-", dir=str(audio_path.parent)) as tmpdir:
-                    chunk_dir = Path(tmpdir)
-                    for index, region in enumerate(asr_regions):
-                        start_seconds = max(0.0, _safe_float(region.get("start", 0.0)))
-                        end_seconds = max(start_seconds, _safe_float(region.get("end", start_seconds)))
-                        start_frame = min(total_frames, max(0, int(start_seconds * sample_rate)))
-                        end_frame = min(total_frames, max(start_frame, int(end_seconds * sample_rate)))
-                        if end_frame <= start_frame:
-                            continue
-
-                        audio_chunk, _ = sf.read(
-                            str(audio_path),
-                            start=start_frame,
-                            stop=end_frame,
-                            dtype="float32",
-                            always_2d=False,
-                        )
-                        if audio_chunk.size == 0:
-                            continue
-
-                        chunk_path = chunk_dir / f"vad_chunk_{index:04d}.wav"
-                        sf.write(
-                            str(chunk_path),
-                            np.asarray(audio_chunk, dtype=np.float32),
-                            sample_rate,
-                            format="WAV",
-                            subtype="PCM_16",
-                        )
-                        chunk_paths.append(chunk_path)
-                        chunk_offsets.append(float(start_frame) / float(sample_rate))
-
-                    if not chunk_paths:
-                        return {
-                            "text": "",
-                            "words": [],
-                            "segments": [],
-                            "language": "en",
-                            "model": self._settings.model_name,
-                        }
-
-                    install_noisy_dependency_log_filters()
-                    _log_vad_batch_plan(
-                        chunk_paths,
-                        chunk_offsets,
-                        device=self._settings.device,
-                    )
-                    raw = model.transcribe(
-                        [str(chunk_path) for chunk_path in chunk_paths],
-                        timestamps=True,
-                    )
+                install_noisy_dependency_log_filters()
+                whole_file_region = _single_region_covers_whole_file(
+                    asr_regions,
+                    total_frames=total_frames,
+                    sample_rate=sample_rate,
+                )
+                if whole_file_region:
+                    raw = model.transcribe([str(audio_path)], timestamps=True)
                     try:
-                        chunks = [
-                            (offset, self._normalize_raw_result(item))
-                            for offset, item in zip(chunk_offsets, _iter_transcript_items(raw))
-                        ]
+                        chunks = [(0.0, self._normalize_raw_result(raw))]
                     finally:
                         del raw
+                else:
+                    chunk_paths: list[Path] = []
+                    chunk_offsets: list[float] = []
+                    with tempfile.TemporaryDirectory(
+                        prefix="parakeetx-vad-chunks-",
+                        dir=str(audio_path.parent),
+                    ) as tmpdir:
+                        chunk_dir = Path(tmpdir)
+                        for index, region in enumerate(asr_regions):
+                            start_seconds = max(0.0, _safe_float(region.get("start", 0.0)))
+                            end_seconds = max(
+                                start_seconds,
+                                _safe_float(region.get("end", start_seconds)),
+                            )
+                            start_frame = min(total_frames, max(0, int(start_seconds * sample_rate)))
+                            end_frame = min(
+                                total_frames,
+                                max(start_frame, int(end_seconds * sample_rate)),
+                            )
+                            if end_frame <= start_frame:
+                                continue
+
+                            audio_chunk, _ = sf.read(
+                                str(audio_path),
+                                start=start_frame,
+                                stop=end_frame,
+                                dtype="float32",
+                                always_2d=False,
+                            )
+                            if audio_chunk.size == 0:
+                                continue
+
+                            chunk_path = chunk_dir / f"vad_chunk_{index:04d}.wav"
+                            sf.write(
+                                str(chunk_path),
+                                np.asarray(audio_chunk, dtype=np.float32),
+                                sample_rate,
+                                format="WAV",
+                                subtype="PCM_16",
+                            )
+                            chunk_paths.append(chunk_path)
+                            chunk_offsets.append(float(start_frame) / float(sample_rate))
+
+                        if not chunk_paths:
+                            return {
+                                "text": "",
+                                "words": [],
+                                "segments": [],
+                                "language": "en",
+                                "model": self._settings.model_name,
+                            }
+
+                        _log_vad_batch_plan(
+                            chunk_paths,
+                            chunk_offsets,
+                            device=self._settings.device,
+                        )
+                        raw = model.transcribe(
+                            [str(chunk_path) for chunk_path in chunk_paths],
+                            timestamps=True,
+                        )
+                        try:
+                            chunks = [
+                                (offset, self._normalize_raw_result(item))
+                                for offset, item in zip(chunk_offsets, _iter_transcript_items(raw))
+                            ]
+                        finally:
+                            del raw
 
                 return self._merge_chunk_payloads(chunks)
         finally:
@@ -755,6 +776,24 @@ def _log_vad_batch_plan(
         first_offset,
         last_offset,
     )
+    logger.info(message)
+    print(message, file=sys.stderr, flush=True)
+
+
+def _single_region_covers_whole_file(
+    regions: list[dict[str, Any]],
+    *,
+    total_frames: int,
+    sample_rate: int,
+) -> bool:
+    if len(regions) != 1:
+        return False
+
+    region = regions[0]
+    start_frame = max(0, int(_safe_float(region.get("start", 0.0)) * sample_rate))
+    end_frame = int(_safe_float(region.get("end", 0.0)) * sample_rate)
+    frame_tolerance = max(1, int(sample_rate * 0.01))
+    return start_frame <= frame_tolerance and end_frame >= total_frames - frame_tolerance
 
 
 def _coalesce_regions_for_asr(
@@ -830,8 +869,6 @@ def _region_child_segments(
         if child_end > child_start:
             child_segments.append((child_start, child_end))
     return child_segments or [(start, end)]
-    logger.info(message)
-    print(message, file=sys.stderr, flush=True)
 
 
 def _ensure_extracted_nemo_cache(

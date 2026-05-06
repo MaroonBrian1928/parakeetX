@@ -175,6 +175,43 @@ def test_transcribe_regions_merges_vad_offsets(monkeypatch: pytest.MonkeyPatch, 
     assert fake_model.calls == [["vad_chunk_0000.wav", "vad_chunk_0001.wav"]]
 
 
+def test_transcribe_regions_reuses_source_when_vad_covers_full_audio(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "audio.wav"
+    _write_silent_wav(audio_path, duration_seconds=10.0)
+
+    manager = ParakeetModelManager(ParakeetSettings())
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def transcribe(self, audio_paths, timestamps=True):
+            _ = timestamps
+            self.calls.append([Path(path).name for path in audio_paths])
+            return {
+                "text": "full",
+                "words": [{"word": "full", "start": 0.0, "end": 0.5}],
+                "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "full"}],
+                "language": "en",
+            }
+
+    def fail_write(*args, **kwargs) -> None:
+        _ = args, kwargs
+        raise AssertionError("full-file VAD region should not be rewritten")
+
+    fake_model = FakeModel()
+    manager._model = fake_model
+    monkeypatch.setattr(sf, "write", fail_write)
+
+    payload = manager.transcribe_regions(audio_path, [{"start": 0.0, "end": 10.0}])
+
+    assert payload["text"] == "full"
+    assert fake_model.calls == [["audio.wav"]]
+
+
 def test_transcribe_regions_coalesces_vad_regions_to_asr_chunk_plan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

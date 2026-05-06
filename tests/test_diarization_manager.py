@@ -168,3 +168,34 @@ def test_diarize_regions_compacts_speech_once_and_remaps(monkeypatch, tmp_path: 
     )
 
     assert segments == [{"start": 3.25, "end": 3.75, "speaker": "SPEAKER_00"}]
+
+
+def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "audio.wav"
+    samples = np.zeros(10 * 16000, dtype=np.float32)
+    sf.write(str(audio_path), samples, 16000)
+
+    manager = DiarizationModelManager(DiarizationSettings(), hf_token="token")
+    calls: list[Path] = []
+
+    def fake_diarize(path, *, min_speakers, max_speakers, num_speakers):
+        assert min_speakers is None
+        assert max_speakers is None
+        assert num_speakers is None
+        calls.append(path)
+        return [{"start": 0.25, "end": 0.75, "speaker": "SPEAKER_00"}]
+
+    def fail_write(*args, **kwargs) -> None:
+        _ = args, kwargs
+        raise AssertionError("full-file VAD interval should not be rewritten")
+
+    monkeypatch.setattr(manager, "diarize", fake_diarize)
+    monkeypatch.setattr(sf, "write", fail_write)
+
+    segments = manager.diarize_regions(audio_path, [{"start": 0.0, "end": 10.0}])
+
+    assert segments == [{"start": 0.25, "end": 0.75, "speaker": "SPEAKER_00"}]
+    assert calls == [audio_path]

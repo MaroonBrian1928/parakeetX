@@ -60,7 +60,7 @@ class DiarizationSettings(BaseModel):
 
 
 class VadSettings(BaseModel):
-    enabled: bool = False
+    enabled: bool = True
     method: str = "silero"
     preload_model: bool = False
     use_onnx: bool = True

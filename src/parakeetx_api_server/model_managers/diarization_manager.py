@@ -229,6 +229,18 @@ class DiarizationModelManager:
         info = sf.info(str(audio_path))
         sample_rate = int(info.samplerate)
         total_frames = int(info.frames)
+        if _single_interval_covers_whole_file(
+            speech_intervals,
+            total_frames=total_frames,
+            sample_rate=sample_rate,
+        ):
+            return self.diarize(
+                audio_path,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                num_speakers=num_speakers,
+            )
+
         compact_chunks: list[np.ndarray] = []
         mapping: list[dict[str, float]] = []
         compact_cursor = 0.0
@@ -330,6 +342,22 @@ def _speech_intervals_from_vad_regions(
             intervals.append((start, end))
 
     return sorted(intervals, key=lambda item: item[0])
+
+
+def _single_interval_covers_whole_file(
+    intervals: list[tuple[float, float]],
+    *,
+    total_frames: int,
+    sample_rate: int,
+) -> bool:
+    if len(intervals) != 1:
+        return False
+
+    start_seconds, end_seconds = intervals[0]
+    start_frame = max(0, int(start_seconds * sample_rate))
+    end_frame = int(end_seconds * sample_rate)
+    frame_tolerance = max(1, int(sample_rate * 0.01))
+    return start_frame <= frame_tolerance and end_frame >= total_frames - frame_tolerance
 
 
 def _map_compact_diarization_to_original(
