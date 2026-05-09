@@ -36,6 +36,8 @@ def clear_dependency_caches(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("DIARIZATION__MODEL_NAME", raising=False)
     monkeypatch.delenv("DIARIZATION__DEVICE", raising=False)
     monkeypatch.delenv("DIARIZATION__PRELOAD_MODEL", raising=False)
+    monkeypatch.delenv("DIARIZATION__SEGMENTATION_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DIARIZATION__EMBEDDING_BATCH_SIZE", raising=False)
     monkeypatch.delenv("VAD__ENABLED", raising=False)
     monkeypatch.delenv("VAD__METHOD", raising=False)
     monkeypatch.delenv("VAD__PRELOAD_MODEL", raising=False)

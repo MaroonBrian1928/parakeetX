@@ -124,6 +124,15 @@ class ParakeetModelManager:
             if self._settings.cuda_half_precision and hasattr(model, "half"):
                 model.half()
                 logger.info("Enabled CUDA half precision for ASR model on %s.", self._settings.device)
+
+            if self._settings.cuda_torch_compile:
+                encoder = getattr(model, "encoder", None)
+                if encoder is not None:
+                    try:
+                        model.encoder = torch.compile(encoder, mode="reduce-overhead", fullgraph=False)
+                        logger.info("Applied torch.compile to ASR encoder on %s.", self._settings.device)
+                    except Exception as compile_exc:
+                        logger.warning("torch.compile on ASR encoder failed; continuing uncompiled: %s", compile_exc)
         except Exception as exc:
             logger.warning("Unable to fully configure CUDA runtime for ASR model: %s", exc)
 
@@ -339,17 +348,25 @@ class ParakeetModelManager:
                             chunk_offsets,
                             device=self._settings.device,
                         )
-                        raw = model.transcribe(
-                            [str(chunk_path) for chunk_path in chunk_paths],
-                            timestamps=True,
-                        )
-                        try:
-                            chunks = [
-                                (offset, self._normalize_raw_result(item))
-                                for offset, item in zip(chunk_offsets, _iter_transcript_items(raw))
-                            ]
-                        finally:
-                            del raw
+                        batch_size = max(1, int(self._settings.cuda_vad_batch_size))
+                        chunks = []
+                        for batch_start in range(0, len(chunk_paths), batch_size):
+                            batch_paths = chunk_paths[batch_start : batch_start + batch_size]
+                            batch_offsets = chunk_offsets[batch_start : batch_start + batch_size]
+                            raw = model.transcribe(
+                                [str(chunk_path) for chunk_path in batch_paths],
+                                timestamps=True,
+                            )
+                            try:
+                                chunks.extend(
+                                    (offset, self._normalize_raw_result(item))
+                                    for offset, item in zip(batch_offsets, _iter_transcript_items(raw))
+                                )
+                            finally:
+                                del raw
+                            release_memory_to_os(
+                                clear_cuda=self._settings.device.startswith("cuda")
+                            )
 
                 return self._merge_chunk_payloads(chunks)
         finally:

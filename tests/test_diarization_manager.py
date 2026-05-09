@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +48,64 @@ def test_diarization_uses_waveform_input(monkeypatch, tmp_path: Path) -> None:
     assert isinstance(calls[0], dict)
     assert calls[1] == {"min_speakers": 1}
     assert result == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
+
+
+def test_load_model_applies_configured_pyannote_batch_sizes(monkeypatch) -> None:
+    events: list[tuple[str, object]] = []
+    created: list[object] = []
+
+    class FakePipeline:
+        def __setattr__(self, name, value):
+            if name in {"segmentation_batch_size", "embedding_batch_size"}:
+                events.append((name, value))
+            super().__setattr__(name, value)
+
+        def to(self, device):
+            events.append(("to", device))
+            return self
+
+    class FakePipelineFactory:
+        @staticmethod
+        def from_pretrained(model_name, token):
+            assert model_name == "pyannote/speaker-diarization-community-1"
+            assert token == "token"
+            pipeline = FakePipeline()
+            created.append(pipeline)
+            return pipeline
+
+    fake_pyannote = types.ModuleType("pyannote")
+    fake_audio = types.ModuleType("pyannote.audio")
+    fake_audio.Pipeline = FakePipelineFactory
+    fake_pyannote.audio = fake_audio
+    monkeypatch.setitem(sys.modules, "pyannote", fake_pyannote)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", fake_audio)
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(device=lambda value: f"device:{value}"),
+    )
+
+    manager = DiarizationModelManager(
+        DiarizationSettings(
+            device="cuda",
+            segmentation_batch_size=128,
+            embedding_batch_size=64,
+        ),
+        hf_token="token",
+    )
+
+    status = manager.load_model()
+
+    assert status["loaded"] is True
+    assert status["segmentation_batch_size"] == 128
+    assert status["embedding_batch_size"] == 64
+    assert getattr(created[0], "segmentation_batch_size") == 128
+    assert getattr(created[0], "embedding_batch_size") == 64
+    assert events == [
+        ("to", "device:cuda"),
+        ("segmentation_batch_size", 128),
+        ("embedding_batch_size", 64),
+    ]
 
 
 def test_process_isolated_diarization_manager_delegates_to_worker(tmp_path: Path) -> None:

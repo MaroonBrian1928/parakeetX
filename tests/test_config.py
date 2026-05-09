@@ -13,6 +13,8 @@ def test_parses_nested_config(monkeypatch):
     monkeypatch.setenv("PARAKEET__USE_EXTRACTED_NEMO_CACHE", "false")
     monkeypatch.setenv("PARAKEET__TORCH_LOAD_MMAP", "false")
     monkeypatch.setenv("DIARIZATION__PRELOAD_MODEL", "true")
+    monkeypatch.setenv("DIARIZATION__SEGMENTATION_BATCH_SIZE", "128")
+    monkeypatch.setenv("DIARIZATION__EMBEDDING_BATCH_SIZE", "96")
     monkeypatch.setenv("VAD__ENABLED", "true")
     monkeypatch.setenv("VAD__METHOD", " silero ")
     monkeypatch.setenv("VAD__USE_ONNX", "false")
@@ -43,6 +45,8 @@ def test_parses_nested_config(monkeypatch):
     assert settings.parakeet.use_extracted_nemo_cache is False
     assert settings.parakeet.torch_load_mmap is False
     assert settings.diarization.preload_model is True
+    assert settings.diarization.segmentation_batch_size == 128
+    assert settings.diarization.embedding_batch_size == 96
     assert settings.vad.enabled is True
     assert settings.vad.method == "silero"
     assert settings.vad.use_onnx is False

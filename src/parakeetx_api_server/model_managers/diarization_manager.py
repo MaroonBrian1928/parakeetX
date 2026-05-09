@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import tempfile
 from pathlib import Path
@@ -12,6 +13,8 @@ from ..config import DiarizationSettings
 from ..memory import release_memory_to_os
 from .idle_eviction import IdleModelEvictor
 from .model_worker import ModelWorkerClient
+
+logger = logging.getLogger(__name__)
 
 
 class DiarizationModelManager:
@@ -45,6 +48,8 @@ class DiarizationModelManager:
             "loaded": self._is_loaded(),
             "model_name": self._settings.model_name,
             "device": self._settings.device,
+            "segmentation_batch_size": self._settings.segmentation_batch_size,
+            "embedding_batch_size": self._settings.embedding_batch_size,
             "idle_evict_minutes": self._idle_evictor.idle_minutes,
             "requires_hf_token": True,
         }
@@ -91,6 +96,7 @@ class DiarizationModelManager:
                 except Exception:
                     pass
 
+            self._configure_pipeline_batch_sizes(pipeline)
             self._pipeline = pipeline
 
         self._idle_evictor.note_loaded()
@@ -299,6 +305,21 @@ class DiarizationModelManager:
         if self._worker_client is not None:
             return self._worker_loaded
         return self._pipeline is not None
+
+    def _configure_pipeline_batch_sizes(self, pipeline: Any) -> None:
+        for attr, value in (
+            ("segmentation_batch_size", self._settings.segmentation_batch_size),
+            ("embedding_batch_size", self._settings.embedding_batch_size),
+        ):
+            try:
+                setattr(pipeline, attr, value)
+            except Exception as exc:
+                logger.warning(
+                    "Unable to set pyannote %s=%s; continuing with pipeline default: %s",
+                    attr,
+                    value,
+                    exc,
+                )
 
     def _run_pipeline(
         self,

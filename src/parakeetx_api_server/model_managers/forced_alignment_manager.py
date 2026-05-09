@@ -140,11 +140,20 @@ class ForcedAlignmentModelManager:
         total_frames = int(info.frames)
         aligned_words: list[dict[str, Any]] = []
 
+        if self._model is None:
+            self.load_model()
+        if self._model is None:
+            raise RuntimeError("Qwen3 forced aligner did not load")
+
+        language_name = _language_name(language)
+        batch_size = max(1, int(self._settings.batch_size))
+
         with tempfile.TemporaryDirectory(
             prefix="parakeetx-qwen-align-",
             dir=str(audio_path.parent),
         ) as tmpdir:
             chunk_dir = Path(tmpdir)
+            prepared: list[tuple[Path, str, float]] = []
             for index, chunk in enumerate(chunks):
                 start_seconds = max(0.0, float(chunk["start"]))
                 end_seconds = max(start_seconds, float(chunk["end"]))
@@ -175,15 +184,20 @@ class ForcedAlignmentModelManager:
                     format="WAV",
                     subtype="PCM_16",
                 )
+                prepared.append((chunk_path, text, float(start_frame) / float(sample_rate)))
 
-                chunk_words = self.align(
-                    chunk_path,
-                    text=text,
-                    language=language,
+            for batch_start in range(0, len(prepared), batch_size):
+                batch = prepared[batch_start : batch_start + batch_size]
+                audios = [str(p) for p, _, _ in batch]
+                texts = [t for _, t, _ in batch]
+                results = self._model.align(
+                    audio=audios,
+                    text=texts,
+                    language=[language_name] * len(batch),
                 )
-                aligned_words.extend(
-                    _offset_words(chunk_words, offset=float(start_frame) / float(sample_rate))
-                )
+                for (_, _, offset), result in zip(batch, results):
+                    chunk_words = [_alignment_item_to_word(item) for item in result]
+                    aligned_words.extend(_offset_words(chunk_words, offset=offset))
 
         return aligned_words
 

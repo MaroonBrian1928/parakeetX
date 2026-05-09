@@ -31,6 +31,8 @@ class ParakeetSettings(BaseModel):
     cuda_chunk_min_seconds: int = Field(default=30, ge=1)
     cuda_chunk_max_seconds: int = Field(default=600, ge=1)
     cuda_chunk_overlap_seconds: float = Field(default=0.0, ge=0.0, le=10.0)
+    cuda_vad_batch_size: int = Field(default=8, ge=1)
+    cuda_torch_compile: bool = False
     use_extracted_nemo_cache: bool = False
     torch_load_mmap: bool = False
 
@@ -52,6 +54,8 @@ class DiarizationSettings(BaseModel):
     model_name: str = "pyannote/speaker-diarization-community-1"
     device: str = "cpu"
     preload_model: bool = False
+    segmentation_batch_size: int = Field(default=64, ge=1)
+    embedding_batch_size: int = Field(default=64, ge=1)
 
     @field_validator("*", mode="before")
     @classmethod
@@ -95,6 +99,7 @@ class ForcedAlignmentSettings(BaseModel):
     dtype: str = "float32"
     attn_implementation: str | None = None
     max_chunk_seconds: float = Field(default=30.0, gt=0.0)
+    batch_size: int = Field(default=4, ge=1)
     preload_model: bool = False
 
     @field_validator("*", mode="before")
