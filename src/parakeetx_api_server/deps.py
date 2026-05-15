@@ -62,4 +62,6 @@ def get_transcription_service() -> TranscriptionService:
         forced_alignment_manager=get_forced_alignment_manager(),
         max_concurrency=settings.max_concurrent_transcriptions,
         unload_asr_before_diarization=settings.unload_asr_before_diarization,
+        unload_asr_before_forced_alignment=settings.unload_asr_before_forced_alignment,
+        empty_cuda_cache_after_stage=settings.empty_cuda_cache_after_stage,
     )

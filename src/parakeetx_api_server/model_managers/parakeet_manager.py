@@ -84,6 +84,8 @@ class ParakeetModelManager:
             save_restore_connector = _build_save_restore_connector(
                 SaveRestoreConnector,
                 torch_load_mmap=self._settings.torch_load_mmap,
+                use_safetensors=self._settings.use_safetensors_fast_load,
+                target_device=self._settings.device,
             )
             if self._settings.use_extracted_nemo_cache:
                 with suppress_noisy_dependency_streams():
@@ -263,11 +265,8 @@ class ParakeetModelManager:
         info = sf.info(str(audio_path))
         sample_rate = int(info.samplerate)
         total_frames = int(info.frames)
-        chunk_plan = self._resolve_chunk_plan(audio_path)
-        asr_regions = _coalesce_regions_for_asr(
-            regions,
-            max_region_seconds=chunk_plan["chunk_seconds"],
-        )
+        # VAD is the single source of truth for chunk size; do not re-coalesce here.
+        asr_regions = regions
 
         try:
             with self._idle_evictor.use():
@@ -292,81 +291,67 @@ class ParakeetModelManager:
                     finally:
                         del raw
                 else:
-                    chunk_paths: list[Path] = []
+                    chunk_arrays: list[np.ndarray] = []
                     chunk_offsets: list[float] = []
-                    with tempfile.TemporaryDirectory(
-                        prefix="parakeetx-vad-chunks-",
-                        dir=str(audio_path.parent),
-                    ) as tmpdir:
-                        chunk_dir = Path(tmpdir)
-                        for index, region in enumerate(asr_regions):
-                            start_seconds = max(0.0, _safe_float(region.get("start", 0.0)))
-                            end_seconds = max(
-                                start_seconds,
-                                _safe_float(region.get("end", start_seconds)),
-                            )
-                            start_frame = min(total_frames, max(0, int(start_seconds * sample_rate)))
-                            end_frame = min(
-                                total_frames,
-                                max(start_frame, int(end_seconds * sample_rate)),
-                            )
-                            if end_frame <= start_frame:
-                                continue
-
-                            audio_chunk, _ = sf.read(
-                                str(audio_path),
-                                start=start_frame,
-                                stop=end_frame,
-                                dtype="float32",
-                                always_2d=False,
-                            )
-                            if audio_chunk.size == 0:
-                                continue
-
-                            chunk_path = chunk_dir / f"vad_chunk_{index:04d}.wav"
-                            sf.write(
-                                str(chunk_path),
-                                np.asarray(audio_chunk, dtype=np.float32),
-                                sample_rate,
-                                format="WAV",
-                                subtype="PCM_16",
-                            )
-                            chunk_paths.append(chunk_path)
-                            chunk_offsets.append(float(start_frame) / float(sample_rate))
-
-                        if not chunk_paths:
-                            return {
-                                "text": "",
-                                "words": [],
-                                "segments": [],
-                                "language": "en",
-                                "model": self._settings.model_name,
-                            }
-
-                        _log_vad_batch_plan(
-                            chunk_paths,
-                            chunk_offsets,
-                            device=self._settings.device,
+                    chunk_durations: list[float] = []
+                    for region in asr_regions:
+                        start_seconds = max(0.0, _safe_float(region.get("start", 0.0)))
+                        end_seconds = max(
+                            start_seconds,
+                            _safe_float(region.get("end", start_seconds)),
                         )
-                        batch_size = max(1, int(self._settings.cuda_vad_batch_size))
-                        chunks = []
-                        for batch_start in range(0, len(chunk_paths), batch_size):
-                            batch_paths = chunk_paths[batch_start : batch_start + batch_size]
-                            batch_offsets = chunk_offsets[batch_start : batch_start + batch_size]
-                            raw = model.transcribe(
-                                [str(chunk_path) for chunk_path in batch_paths],
-                                timestamps=True,
+                        start_frame = min(total_frames, max(0, int(start_seconds * sample_rate)))
+                        end_frame = min(
+                            total_frames,
+                            max(start_frame, int(end_seconds * sample_rate)),
+                        )
+                        if end_frame <= start_frame:
+                            continue
+
+                        audio_chunk, _ = sf.read(
+                            str(audio_path),
+                            start=start_frame,
+                            stop=end_frame,
+                            dtype="float32",
+                            always_2d=False,
+                        )
+                        if audio_chunk.size == 0:
+                            continue
+
+                        chunk_arrays.append(np.ascontiguousarray(audio_chunk, dtype=np.float32))
+                        chunk_offsets.append(float(start_frame) / float(sample_rate))
+                        chunk_durations.append(float(end_frame - start_frame) / float(sample_rate))
+
+                    if not chunk_arrays:
+                        return {
+                            "text": "",
+                            "words": [],
+                            "segments": [],
+                            "language": "en",
+                            "model": self._settings.model_name,
+                        }
+
+                    _log_vad_batch_plan(
+                        chunk_durations,
+                        chunk_offsets,
+                        device=self._settings.device,
+                    )
+                    batch_size = max(1, int(self._settings.cuda_vad_batch_size))
+                    chunks = []
+                    for batch_start in range(0, len(chunk_arrays), batch_size):
+                        batch_arrays = chunk_arrays[batch_start : batch_start + batch_size]
+                        batch_offsets = chunk_offsets[batch_start : batch_start + batch_size]
+                        raw = model.transcribe(
+                            batch_arrays,
+                            timestamps=True,
+                        )
+                        try:
+                            chunks.extend(
+                                (offset, self._normalize_raw_result(item))
+                                for offset, item in zip(batch_offsets, _iter_transcript_items(raw))
                             )
-                            try:
-                                chunks.extend(
-                                    (offset, self._normalize_raw_result(item))
-                                    for offset, item in zip(batch_offsets, _iter_transcript_items(raw))
-                                )
-                            finally:
-                                del raw
-                            release_memory_to_os(
-                                clear_cuda=self._settings.device.startswith("cuda")
-                            )
+                        finally:
+                            del raw
 
                 return self._merge_chunk_payloads(chunks)
         finally:
@@ -770,23 +755,22 @@ def _fmt_gib(value: Any) -> str:
 
 
 def _log_vad_batch_plan(
-    chunk_paths: list[Path],
+    chunk_durations: list[float],
     chunk_offsets: list[float],
     *,
     device: str,
 ) -> None:
-    if not chunk_paths:
+    if not chunk_durations:
         return
-    durations = [_audio_duration_seconds(path) for path in chunk_paths]
-    total_speech_seconds = sum(durations)
-    max_duration = max(durations) if durations else 0.0
+    total_speech_seconds = sum(chunk_durations)
+    max_duration = max(chunk_durations) if chunk_durations else 0.0
     first_offset = chunk_offsets[0] if chunk_offsets else 0.0
     last_offset = chunk_offsets[-1] if chunk_offsets else 0.0
     message = (
         "ASR VAD batch plan: chunks=%s speech_duration=%.2fs max_chunk=%.2fs "
         "device=%s first_offset=%.2fs last_offset=%.2fs"
     ) % (
-        len(chunk_paths),
+        len(chunk_durations),
         total_speech_seconds,
         max_duration,
         device,
@@ -811,81 +795,6 @@ def _single_region_covers_whole_file(
     end_frame = int(_safe_float(region.get("end", 0.0)) * sample_rate)
     frame_tolerance = max(1, int(sample_rate * 0.01))
     return start_frame <= frame_tolerance and end_frame >= total_frames - frame_tolerance
-
-
-def _coalesce_regions_for_asr(
-    regions: list[dict[str, Any]],
-    *,
-    max_region_seconds: int | None,
-) -> list[dict[str, Any]]:
-    if not regions or max_region_seconds is None:
-        return regions
-
-    max_seconds = float(max_region_seconds)
-    coalesced: list[dict[str, Any]] = []
-    current_start: float | None = None
-    current_end: float | None = None
-    current_segments: list[tuple[float, float]] = []
-
-    for region in regions:
-        start = max(0.0, _safe_float(region.get("start", 0.0)))
-        end = max(start, _safe_float(region.get("end", start)))
-        if end <= start:
-            continue
-
-        child_segments = _region_child_segments(region, start=start, end=end)
-        if current_start is None or current_end is None:
-            current_start = start
-            current_end = end
-            current_segments = child_segments
-            continue
-
-        if end - current_start > max_seconds and current_end > current_start:
-            coalesced.append(
-                {
-                    "start": current_start,
-                    "end": current_end,
-                    "segments": current_segments,
-                }
-            )
-            current_start = start
-            current_segments = child_segments
-        else:
-            current_segments.extend(child_segments)
-
-        current_end = end
-
-    if current_start is not None and current_end is not None and current_end > current_start:
-        coalesced.append(
-            {
-                "start": current_start,
-                "end": current_end,
-                "segments": current_segments,
-            }
-        )
-
-    return coalesced
-
-
-def _region_child_segments(
-    region: dict[str, Any],
-    *,
-    start: float,
-    end: float,
-) -> list[tuple[float, float]]:
-    raw_segments = region.get("segments")
-    if not isinstance(raw_segments, list):
-        return [(start, end)]
-
-    child_segments: list[tuple[float, float]] = []
-    for item in raw_segments:
-        if not isinstance(item, (list, tuple)) or len(item) != 2:
-            continue
-        child_start = max(start, _safe_float(item[0], start))
-        child_end = min(end, max(child_start, _safe_float(item[1], child_start)))
-        if child_end > child_start:
-            child_segments.append((child_start, child_end))
-    return child_segments or [(start, end)]
 
 
 def _ensure_extracted_nemo_cache(
@@ -929,27 +838,115 @@ def _build_save_restore_connector(
     SaveRestoreConnector: Any,
     *,
     torch_load_mmap: bool,
+    use_safetensors: bool = False,
+    target_device: str = "cpu",
 ) -> Any:
-    if not torch_load_mmap:
+    if not torch_load_mmap and not use_safetensors:
         return SaveRestoreConnector()
 
-    class MMapSaveRestoreConnector(SaveRestoreConnector):
+    class FastSaveRestoreConnector(SaveRestoreConnector):
         @staticmethod
         def _load_state_dict_from_disk(model_weights, map_location="cpu"):
             import torch
 
-            try:
-                return torch.load(
-                    model_weights,
-                    map_location=map_location,
-                    weights_only=True,
-                    mmap=True,
-                )
-            except TypeError:
-                return torch.load(
-                    model_weights,
-                    map_location=map_location,
-                    weights_only=True,
-                )
+            if use_safetensors:
+                try:
+                    safetensors_path = _ensure_safetensors_weights(Path(model_weights))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Safetensors fast-load conversion failed; falling back to torch.load: %s",
+                        exc,
+                    )
+                else:
+                    from safetensors.torch import load_file
+
+                    device = _safetensors_device(map_location, target_device)
+                    try:
+                        return load_file(str(safetensors_path), device=device)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Safetensors load failed; falling back to torch.load: %s",
+                            exc,
+                        )
+
+            if torch_load_mmap:
+                try:
+                    return torch.load(
+                        model_weights,
+                        map_location=map_location,
+                        weights_only=True,
+                        mmap=True,
+                    )
+                except TypeError:
+                    pass
+            return torch.load(
+                model_weights,
+                map_location=map_location,
+                weights_only=True,
+            )
+
+    return FastSaveRestoreConnector()
+
+
+def _safetensors_device(map_location: Any, target_device: str) -> str:
+    import torch
+
+    candidate = map_location
+    if isinstance(candidate, torch.device):
+        candidate = str(candidate)
+    if not isinstance(candidate, str) or not candidate:
+        candidate = target_device or "cpu"
+    if candidate.startswith("cuda") and not torch.cuda.is_available():
+        return "cpu"
+    return candidate
+
+
+def _ensure_safetensors_weights(ckpt_path: Path) -> Path:
+    safetensors_path = ckpt_path.with_suffix(".safetensors")
+    if safetensors_path.is_file():
+        return safetensors_path
+
+    import torch
+    from safetensors.torch import save_file
+
+    logger.info("Converting %s to safetensors for fast load (one-time).", ckpt_path)
+    try:
+        state_dict = torch.load(
+            ckpt_path,
+            map_location="cpu",
+            weights_only=True,
+            mmap=True,
+        )
+    except TypeError:
+        state_dict = torch.load(
+            ckpt_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+
+    flat: dict[str, Any] = {}
+    for key, value in state_dict.items():
+        if not isinstance(value, torch.Tensor):
+            raise RuntimeError(
+                f"Cannot convert checkpoint to safetensors: entry {key!r} is not a tensor"
+            )
+        tensor = value
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+        flat[key] = tensor.detach().clone()
+
+    tmp_path = safetensors_path.with_suffix(".safetensors.tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    try:
+        save_file(flat, str(tmp_path))
+        tmp_path.rename(safetensors_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+    logger.info("Wrote safetensors weights at %s.", safetensors_path)
+    return safetensors_path
 
     return MMapSaveRestoreConnector()

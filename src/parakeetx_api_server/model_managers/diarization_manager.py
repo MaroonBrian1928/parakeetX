@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +96,11 @@ class DiarizationModelManager:
                     pass
 
             self._configure_pipeline_batch_sizes(pipeline)
+            if (
+                self._settings.cuda_half_precision
+                and self._settings.device.startswith("cuda")
+            ):
+                self._apply_half_precision(pipeline)
             self._pipeline = pipeline
 
         self._idle_evictor.note_loaded()
@@ -188,7 +192,6 @@ class DiarizationModelManager:
             finally:
                 del annotation
                 del iterable_annotation
-                release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
 
     def diarize_regions(
         self,
@@ -282,22 +285,51 @@ class DiarizationModelManager:
         if not compact_chunks:
             return []
 
-        with tempfile.TemporaryDirectory(prefix="parakeetx-diarization-vad-", dir=str(audio_path.parent)) as tmpdir:
-            compact_path = Path(tmpdir) / "speech_only.wav"
-            compact_audio = np.concatenate(compact_chunks, axis=0)
-            sf.write(
-                str(compact_path),
-                compact_audio,
-                sample_rate,
-                format="WAV",
-                subtype="PCM_16",
+        compact_audio = np.concatenate(compact_chunks, axis=0)
+
+        with self._idle_evictor.use():
+            pipeline = self._pipeline
+            if pipeline is None:
+                self.load_model()
+                pipeline = self._pipeline
+            if pipeline is None:
+                raise RuntimeError("Diarization model failed to load")
+
+            kwargs: dict[str, Any] = {}
+            if min_speakers is not None:
+                kwargs["min_speakers"] = min_speakers
+            if max_speakers is not None:
+                kwargs["max_speakers"] = max_speakers
+            if num_speakers is not None:
+                kwargs["num_speakers"] = num_speakers
+
+            annotation = self._run_pipeline(
+                pipeline,
+                None,
+                kwargs,
+                waveform=compact_audio,
+                sample_rate=sample_rate,
             )
-            compact_segments = self.diarize(
-                compact_path,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-                num_speakers=num_speakers,
-            )
+
+            iterable_annotation = annotation
+            if not hasattr(iterable_annotation, "itertracks"):
+                wrapped = getattr(annotation, "speaker_diarization", None)
+                if wrapped is not None and hasattr(wrapped, "itertracks"):
+                    iterable_annotation = wrapped
+            if not hasattr(iterable_annotation, "itertracks"):
+                raise RuntimeError(
+                    f"Unsupported diarization output type: {type(annotation).__name__}"
+                )
+
+            compact_segments: list[dict[str, Any]] = []
+            for segment, _, speaker in iterable_annotation.itertracks(yield_label=True):
+                compact_segments.append(
+                    {
+                        "start": float(segment.start),
+                        "end": float(segment.end),
+                        "speaker": str(speaker),
+                    }
+                )
 
         return _map_compact_diarization_to_original(compact_segments, mapping)
 
@@ -324,24 +356,98 @@ class DiarizationModelManager:
     def _run_pipeline(
         self,
         pipeline: Any,
-        audio_path: Path,
+        audio_path: Path | None,
         kwargs: dict[str, Any],
+        *,
+        waveform: np.ndarray | None = None,
+        sample_rate: int | None = None,
     ) -> Any:
-        waveform, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
-        mono = np.asarray(waveform, dtype=np.float32).mean(axis=1)
+        if waveform is None:
+            if audio_path is None:
+                raise ValueError("_run_pipeline requires audio_path or waveform")
+            file_waveform, file_sample_rate = sf.read(
+                str(audio_path), dtype="float32", always_2d=True
+            )
+            mono = np.asarray(file_waveform, dtype=np.float32).mean(axis=1)
+            sample_rate = int(file_sample_rate)
+        else:
+            mono = np.asarray(waveform, dtype=np.float32)
+            if mono.ndim == 2:
+                mono = mono.mean(axis=1)
+            if sample_rate is None:
+                raise ValueError("sample_rate required when passing waveform")
+
         import torch
 
         audio_input = {
             "waveform": torch.from_numpy(mono).unsqueeze(0),
             "sample_rate": int(sample_rate),
         }
+        return pipeline(audio_input, **kwargs)
+
+    def _apply_half_precision(self, pipeline: Any) -> None:
+        """Convert pyannote's embedding model to FP16 in place and wrap its forward
+        to auto-cast float inputs.
+
+        Pyannote's Inference wrapper moves inputs to the device but doesn't cast
+        dtype, so a half model with float32 inputs crashes inside batch/instance
+        norm. We wrap forward to cast any float-tensor inputs to the model's dtype.
+
+        We deliberately skip the segmentation model: SincNet's instance_norm path
+        is dtype-sensitive and the convert+wrap dance there has rough edges; the
+        embedding pass is the dominant cost anyway.
+        """
+        candidate_paths = (
+            ("_embedding", "model_"),
+            ("_embedding", "model"),
+            ("embedding_model",),
+        )
+        converted = 0
+        for path in candidate_paths:
+            obj: Any = pipeline
+            for attr in path:
+                obj = getattr(obj, attr, None)
+                if obj is None:
+                    break
+            if obj is None or not hasattr(obj, "half") or not hasattr(obj, "forward"):
+                continue
+            try:
+                obj.half()
+                _wrap_forward_with_dtype_cast(obj)
+                converted += 1
+            except Exception as exc:
+                logger.warning("FP16 conversion failed for pyannote %s: %s", ".".join(path), exc)
+        logger.info("Pyannote FP16 conversion: %d submodules", converted)
+
+
+def _wrap_forward_with_dtype_cast(model: Any) -> None:
+    """Replace model.forward with a wrapper that casts float-tensor args to the
+    model's parameter dtype, so callers (like pyannote's Inference) that don't
+    handle dtype themselves still work after a .half() conversion."""
+    import torch
+
+    original_forward = model.forward
+
+    def _target_dtype() -> Any:
         try:
-            return pipeline(audio_input, **kwargs)
-        finally:
-            del audio_input
-            del mono
-            del waveform
-            release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
+            return next(model.parameters()).dtype
+        except StopIteration:
+            return None
+
+    def _cast(value: Any, dtype: Any) -> Any:
+        if isinstance(value, torch.Tensor) and value.is_floating_point():
+            return value.to(dtype)
+        return value
+
+    def _wrapped_forward(*args: Any, **kwargs: Any) -> Any:
+        dtype = _target_dtype()
+        if dtype is None:
+            return original_forward(*args, **kwargs)
+        cast_args = tuple(_cast(a, dtype) for a in args)
+        cast_kwargs = {k: _cast(v, dtype) for k, v in kwargs.items()}
+        return original_forward(*cast_args, **cast_kwargs)
+
+    model.forward = _wrapped_forward
 
 
 def _speech_intervals_from_vad_regions(

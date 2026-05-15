@@ -186,3 +186,13 @@ def test_cuda_device_not_ready_error_mentions_smaller_chunks():
 def test_translations_return_501(client):
     response = client.post("/v1/audio/translations")
     assert response.status_code == 501
+
+
+def test_list_models(client):
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "list"
+    ids = [m["id"] for m in body["data"]]
+    assert "whisper-1" in ids
+    assert "nvidia/parakeet-tdt-0.6b-v2" in ids

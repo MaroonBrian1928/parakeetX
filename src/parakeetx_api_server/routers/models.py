@@ -7,6 +7,7 @@ from ..deps import (
     get_diarization_manager,
     get_forced_alignment_manager,
     get_parakeet_manager,
+    get_settings,
     get_vad_manager,
 )
 from ..model_managers.diarization_manager import DiarizationModelManager
@@ -15,6 +16,29 @@ from ..model_managers.parakeet_manager import ParakeetModelManager
 from ..model_managers.vad_manager import VadModelManager
 
 router = APIRouter(prefix="/v1/models", tags=["models"])
+
+
+@router.get("", dependencies=[Depends(require_api_key)])
+async def list_models(
+    parakeet: ParakeetModelManager = Depends(get_parakeet_manager),
+):
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "whisper-1",
+                "object": "model",
+                "created": 1715788800,
+                "owned_by": "openai",
+            },
+            {
+                "id": parakeet.configured_model_name,
+                "object": "model",
+                "created": 1715788800,
+                "owned_by": "nvidia",
+            },
+        ],
+    }
 
 
 @router.get("/status", dependencies=[Depends(require_api_key)])

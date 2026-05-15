@@ -35,6 +35,7 @@ class ParakeetSettings(BaseModel):
     cuda_torch_compile: bool = False
     use_extracted_nemo_cache: bool = False
     torch_load_mmap: bool = False
+    use_safetensors_fast_load: bool = False
 
     @field_validator("*", mode="before")
     @classmethod
@@ -56,6 +57,7 @@ class DiarizationSettings(BaseModel):
     preload_model: bool = False
     segmentation_batch_size: int = Field(default=64, ge=1)
     embedding_batch_size: int = Field(default=64, ge=1)
+    cuda_half_precision: bool = False
 
     @field_validator("*", mode="before")
     @classmethod
@@ -67,6 +69,7 @@ class VadSettings(BaseModel):
     enabled: bool = True
     method: str = "silero"
     preload_model: bool = False
+    device: str = "auto"
     use_onnx: bool = True
     onnx_fallback_to_jit: bool = True
     onnx_opset_version: int = Field(default=16, ge=1)
@@ -88,6 +91,15 @@ class VadSettings(BaseModel):
         normalized = value.lower().strip()
         if normalized != "silero":
             raise ValueError("Only silero VAD is supported")
+        return normalized
+
+    @field_validator("device")
+    @classmethod
+    def _validate_device(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        allowed = {"auto", "cpu", "cuda"}
+        if normalized not in allowed:
+            raise ValueError("vad device must be auto, cpu, or cuda")
         return normalized
 
 
@@ -151,6 +163,8 @@ class Settings(BaseSettings):
     model_idle_evict_minutes: float | None = Field(default=None, ge=0)
     model_process_isolation: bool = False
     unload_asr_before_diarization: bool = False
+    unload_asr_before_forced_alignment: bool = False
+    empty_cuda_cache_after_stage: bool = False
 
     uvicorn_host: str = "0.0.0.0"
     uvicorn_port: int = 7474

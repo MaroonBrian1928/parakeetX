@@ -18,6 +18,7 @@ class ModelWorkerClient:
             "parakeet": settings.parakeet.model_dump(),
             "diarization": settings.diarization.model_dump(),
             "hf_token": settings.hf_token,
+            "empty_cuda_cache_after_stage": settings.empty_cuda_cache_after_stage,
         }
         self._lock = threading.Lock()
         self._process: mp.Process | None = None
@@ -217,6 +218,25 @@ def _model_worker_main(
 
     parakeet_manager = None
     diarization_manager = None
+    empty_cache_after_stage = bool(settings_payload.get("empty_cuda_cache_after_stage"))
+    stage_commands = {
+        "transcribe_parakeet",
+        "transcribe_parakeet_regions",
+        "diarize",
+        "diarize_regions",
+    }
+
+    def _release_cuda_cache() -> None:
+        try:
+            import gc
+
+            import torch
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            logger.warning("CUDA cache release failed: %s", exc)
 
     try:
         while True:
@@ -285,6 +305,8 @@ def _model_worker_main(
                     }
                 else:
                     raise RuntimeError(f"Unknown model worker command: {command}")
+                if empty_cache_after_stage and command in stage_commands:
+                    _release_cuda_cache()
                 connection.send((True, result))
             except Exception as exc:
                 logger.exception("Model worker command failed: %s", command)

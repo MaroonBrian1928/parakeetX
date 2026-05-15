@@ -139,11 +139,13 @@ def test_transcribe_regions_merges_vad_offsets(monkeypatch: pytest.MonkeyPatch, 
 
     class FakeModel:
         def __init__(self) -> None:
-            self.calls: list[list[str]] = []
+            self.durations: list[float] = []
 
         def transcribe(self, audio_paths, timestamps=True):
             _ = timestamps
-            self.calls.append([Path(path).name for path in audio_paths])
+            self.durations.extend(
+                float(np.asarray(path).shape[0]) / 16_000 for path in audio_paths
+            )
             return [
                 {
                     "text": "hello",
@@ -172,7 +174,7 @@ def test_transcribe_regions_merges_vad_offsets(monkeypatch: pytest.MonkeyPatch, 
     assert payload["words"][1]["start"] == pytest.approx(7.0)
     assert payload["segments"][0]["start"] == pytest.approx(2.0)
     assert payload["segments"][1]["start"] == pytest.approx(7.0)
-    assert fake_model.calls == [["vad_chunk_0000.wav", "vad_chunk_0001.wav"]]
+    assert fake_model.durations == pytest.approx([1.0, 1.0])
 
 
 def test_transcribe_regions_reuses_source_when_vad_covers_full_audio(
@@ -212,7 +214,7 @@ def test_transcribe_regions_reuses_source_when_vad_covers_full_audio(
     assert fake_model.calls == [["audio.wav"]]
 
 
-def test_transcribe_regions_coalesces_vad_regions_to_asr_chunk_plan(
+def test_transcribe_regions_batches_vad_regions_as_arrays(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -236,18 +238,24 @@ def test_transcribe_regions_coalesces_vad_regions_to_asr_chunk_plan(
 
     class FakeModel:
         def __init__(self) -> None:
-            self.calls: list[list[str]] = []
             self.durations: list[float] = []
 
         def transcribe(self, audio_paths, timestamps=True):
             _ = timestamps
-            self.calls.append([Path(path).name for path in audio_paths])
-            self.durations.extend(sf.info(path).duration for path in audio_paths)
+            self.durations.extend(
+                float(np.asarray(path).shape[0]) / 16_000 for path in audio_paths
+            )
             return [
                 {
                     "text": "first",
                     "words": [{"word": "first", "start": 0.0, "end": 0.5}],
                     "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "first"}],
+                    "language": "en",
+                },
+                {
+                    "text": "middle",
+                    "words": [{"word": "middle", "start": 0.0, "end": 0.5}],
+                    "segments": [{"id": 0, "start": 0.0, "end": 0.5, "text": "middle"}],
                     "language": "en",
                 },
                 {
@@ -270,10 +278,10 @@ def test_transcribe_regions_coalesces_vad_regions_to_asr_chunk_plan(
         ],
     )
 
-    assert fake_model.calls == [["vad_chunk_0000.wav", "vad_chunk_0001.wav"]]
-    assert fake_model.durations == pytest.approx([4.0, 2.0])
+    assert fake_model.durations == pytest.approx([2.0, 1.0, 2.0])
     assert payload["words"][0]["start"] == pytest.approx(0.0)
-    assert payload["words"][1]["start"] == pytest.approx(6.0)
+    assert payload["words"][1]["start"] == pytest.approx(3.0)
+    assert payload["words"][2]["start"] == pytest.approx(6.0)
 
 
 def test_normalize_raw_result_handles_nemo_hypothesis_object() -> None:

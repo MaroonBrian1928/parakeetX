@@ -208,17 +208,33 @@ def test_diarize_regions_compacts_speech_once_and_remaps(monkeypatch, tmp_path: 
     audio_path = tmp_path / "audio.wav"
     samples = np.zeros(10 * 16000, dtype=np.float32)
     sf.write(str(audio_path), samples, 16000)
+    calls: list[object] = []
 
     manager = DiarizationModelManager(DiarizationSettings(), hf_token="token")
 
-    def fake_diarize(path, *, min_speakers, max_speakers, num_speakers):
-        _ = path
-        assert min_speakers == 1
-        assert max_speakers is None
-        assert num_speakers is None
-        return [{"start": 0.25, "end": 0.75, "speaker": "SPEAKER_00"}]
+    class FakeAnnotation:
+        def itertracks(self, yield_label: bool):
+            assert yield_label is True
+            segment = type("Segment", (), {"start": 0.25, "end": 0.75})()
+            yield segment, None, "SPEAKER_00"
 
-    monkeypatch.setattr(manager, "diarize", fake_diarize)
+    class FakePipeline:
+        def __call__(self, audio_input, **kwargs):
+            calls.append(audio_input)
+            calls.append(kwargs)
+            return FakeAnnotation()
+
+    class FakeTensor:
+        def __init__(self, value):
+            self.value = value
+
+        def unsqueeze(self, dim):
+            assert dim == 0
+            return self
+
+    fake_torch = types.SimpleNamespace(from_numpy=lambda value: FakeTensor(value))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    manager._pipeline = FakePipeline()
 
     segments = manager.diarize_regions(
         audio_path,
@@ -227,6 +243,9 @@ def test_diarize_regions_compacts_speech_once_and_remaps(monkeypatch, tmp_path: 
     )
 
     assert segments == [{"start": 3.25, "end": 3.75, "speaker": "SPEAKER_00"}]
+    assert calls[0]["sample_rate"] == 16000
+    assert calls[0]["waveform"].value.shape == (16000,)
+    assert calls[1] == {"min_speakers": 1}
 
 
 def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
