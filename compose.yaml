@@ -4,6 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cuda-legacy
+    restart: unless-stopped
     env_file:
       - .env
     environment:
