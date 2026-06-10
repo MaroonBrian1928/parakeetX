@@ -10,6 +10,7 @@ import soundfile as sf
 
 from ..config import DiarizationSettings
 from ..memory import release_memory_to_os
+from .device_capability import MIN_FP16_CAPABILITY, cuda_compute_capability, meets_capability
 from .idle_eviction import IdleModelEvictor
 from .model_worker import ModelWorkerClient
 
@@ -100,7 +101,16 @@ class DiarizationModelManager:
                 self._settings.cuda_half_precision
                 and self._settings.device.startswith("cuda")
             ):
-                self._apply_half_precision(pipeline)
+                if meets_capability(self._settings.device, MIN_FP16_CAPABILITY):
+                    self._apply_half_precision(pipeline)
+                else:
+                    logger.warning(
+                        "Skipping diarization half precision: compute capability %s on %s is below %s, "
+                        "where FP16 runs slower than FP32.",
+                        cuda_compute_capability(self._settings.device),
+                        self._settings.device,
+                        MIN_FP16_CAPABILITY,
+                    )
             self._pipeline = pipeline
 
         self._idle_evictor.note_loaded()

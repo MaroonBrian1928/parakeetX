@@ -14,6 +14,12 @@ import soundfile as sf
 from ..config import ParakeetSettings
 from ..log_filters import install_noisy_dependency_log_filters, suppress_noisy_dependency_streams
 from ..memory import release_memory_to_os
+from .device_capability import (
+    MIN_FP16_CAPABILITY,
+    MIN_TORCH_COMPILE_CAPABILITY,
+    cuda_compute_capability,
+    meets_capability,
+)
 from .idle_eviction import IdleModelEvictor
 from .model_worker import ModelWorkerClient
 
@@ -124,10 +130,28 @@ class ParakeetModelManager:
                 model.to(device)
 
             if self._settings.cuda_half_precision and hasattr(model, "half"):
-                model.half()
-                logger.info("Enabled CUDA half precision for ASR model on %s.", self._settings.device)
+                if meets_capability(self._settings.device, MIN_FP16_CAPABILITY):
+                    model.half()
+                    logger.info("Enabled CUDA half precision for ASR model on %s.", self._settings.device)
+                else:
+                    logger.warning(
+                        "Skipping CUDA half precision: compute capability %s on %s is below %s, "
+                        "where FP16 runs slower than FP32.",
+                        cuda_compute_capability(self._settings.device),
+                        self._settings.device,
+                        MIN_FP16_CAPABILITY,
+                    )
 
-            if self._settings.cuda_torch_compile:
+            if self._settings.cuda_torch_compile and not meets_capability(
+                self._settings.device, MIN_TORCH_COMPILE_CAPABILITY
+            ):
+                logger.warning(
+                    "Skipping torch.compile: compute capability %s on %s is below Triton's minimum %s.",
+                    cuda_compute_capability(self._settings.device),
+                    self._settings.device,
+                    MIN_TORCH_COMPILE_CAPABILITY,
+                )
+            elif self._settings.cuda_torch_compile:
                 encoder = getattr(model, "encoder", None)
                 if encoder is not None:
                     try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import tempfile
 from dataclasses import dataclass
@@ -10,6 +11,15 @@ import numpy as np
 import soundfile as sf
 
 from ..config import ForcedAlignmentSettings
+from .device_capability import (
+    MIN_BF16_CAPABILITY,
+    MIN_FLASH_ATTENTION_CAPABILITY,
+    MIN_FP16_CAPABILITY,
+    cuda_compute_capability,
+    meets_capability,
+)
+
+logger = logging.getLogger(__name__)
 
 
 _LANGUAGE_NAMES = {
@@ -80,17 +90,48 @@ class ForcedAlignmentModelManager:
                 ) from exc
 
             kwargs: dict[str, Any] = {
-                "dtype": _torch_dtype(torch, self._settings.dtype),
+                "dtype": _torch_dtype(torch, self._resolve_dtype()),
                 "device_map": self._settings.device,
             }
-            if self._settings.attn_implementation:
-                kwargs["attn_implementation"] = self._settings.attn_implementation
+            attn_implementation = self._resolve_attn_implementation()
+            if attn_implementation:
+                kwargs["attn_implementation"] = attn_implementation
 
             self._model = Qwen3ForcedAligner.from_pretrained(
                 self._settings.model_name,
                 **kwargs,
             )
             return self.status()
+
+    def _resolve_dtype(self) -> str:
+        dtype = self._settings.dtype
+        minimum = {"bfloat16": MIN_BF16_CAPABILITY, "float16": MIN_FP16_CAPABILITY}.get(dtype)
+        if minimum is None or meets_capability(self._settings.device, minimum):
+            return dtype
+        logger.warning(
+            "Forced alignment dtype %s requires compute capability %s; %s reports %s. Using float32.",
+            dtype,
+            minimum,
+            self._settings.device,
+            cuda_compute_capability(self._settings.device),
+        )
+        return "float32"
+
+    def _resolve_attn_implementation(self) -> str | None:
+        attn_implementation = self._settings.attn_implementation
+        if attn_implementation in {"flash_attention_2", "flash_attention_3"} and not meets_capability(
+            self._settings.device, MIN_FLASH_ATTENTION_CAPABILITY
+        ):
+            logger.warning(
+                "Forced alignment attn_implementation %s requires compute capability %s; "
+                "%s reports %s. Using the default implementation.",
+                attn_implementation,
+                MIN_FLASH_ATTENTION_CAPABILITY,
+                self._settings.device,
+                cuda_compute_capability(self._settings.device),
+            )
+            return None
+        return attn_implementation
 
     def unload_model(self) -> dict[str, Any]:
         with self._lock:
