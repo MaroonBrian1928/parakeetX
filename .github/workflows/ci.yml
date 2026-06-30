@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yml"
+
+# Deliberately minimal: installs only the base deps + the `dev` group and runs
+# pytest. It does NOT install the heavy optional extras (nemo / diarization /
+# vad / forced-alignment / cuda → torch, nemo-toolkit, pyannote) or use a CUDA
+# image, so runner time stays in the seconds. The integration-guard tests skip
+# themselves when those extras are absent.
+jobs:
+  test:
+    name: Minimal test (no GPU/ML extras)
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install base + dev dependencies (no extras)
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest
