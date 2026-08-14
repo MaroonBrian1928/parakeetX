@@ -36,6 +36,34 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}"
 
+# Patch NeMo's RNNT segment-timestamp IndexError. _get_segment_offsets indexes
+# word[-1] without guarding against an empty decoded word, so certain audio raises
+# "IndexError: string index out of range", which the API surfaces as HTTP 422.
+# The line is unguarded in NeMo 2.3.0 (what the cu118 lockfile resolves here).
+# Upstream NeMo added the `word and ...` guard in 2.4.0, but we can't move to it on
+# this build: qwen-asr pins transformers==4.57.6 while NeMo>=2.4 needs
+# transformers<4.54. See https://github.com/MaroonBrian1928/parakeetX/issues/9
+# No-op on NeMo versions that already ship the guard (patched count is 0).
+RUN python3 <<'PATCH'
+import pathlib
+init = next(pathlib.Path("/app/.venv").rglob("site-packages/nemo/__init__.py"), None)
+assert init is not None, "nemo not found in venv"
+base = init.parent
+old = "elif word[-1] in segment_delimiter_tokens or word in segment_delimiter_tokens:"
+new = "elif word and (word[-1] in segment_delimiter_tokens or word in segment_delimiter_tokens):"
+patched = 0
+for f in base.rglob("*.py"):
+    text = f.read_text()
+    if old in text:
+        f.write_text(text.replace(old, new))
+        patched += 1
+        print("patched", f)
+# Fail the build if any unguarded occurrence remains (guards against silent misses).
+for f in base.rglob("*.py"):
+    assert old not in f.read_text(), f"unguarded segment-offset line remains in {f}"
+print(f"NeMo RNNT guard patch complete ({patched} file(s) changed)")
+PATCH
+
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
