@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import threading
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -46,11 +45,6 @@ _LANGUAGE_NAMES = {
     "es": "Spanish",
     "spanish": "Spanish",
 }
-
-
-@dataclass(frozen=True)
-class ForcedAlignmentOptions:
-    enabled: bool
 
 
 class ForcedAlignmentModelManager:
@@ -137,30 +131,6 @@ class ForcedAlignmentModelManager:
         with self._lock:
             self._model = None
         return self.status()
-
-    def align(
-        self,
-        audio_path: Path,
-        *,
-        text: str,
-        language: str | None,
-    ) -> list[dict[str, Any]]:
-        if not text.strip():
-            return []
-        if self._model is None:
-            self.load_model()
-        if self._model is None:
-            raise RuntimeError("Qwen3 forced aligner did not load")
-
-        results = self._model.align(
-            audio=str(audio_path),
-            text=text,
-            language=_language_name(language),
-        )
-        if not results:
-            return []
-
-        return [_alignment_item_to_word(item) for item in results[0]]
 
     def align_segments(
         self,

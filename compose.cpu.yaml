@@ -12,3 +12,8 @@ services:
       DIARIZATION__DEVICE: cpu
     ports:
       - "${HOST_PORT:-7474}:${UVICORN_PORT:-7474}"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+
+volumes:
+  hf-cache:

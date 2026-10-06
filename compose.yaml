@@ -3,8 +3,13 @@ services:
     image: ghcr.io/maroonbrian1928/parakeetx:cuda-legacy
     build:
       context: .
-      dockerfile: Dockerfile.cuda-legacy
-    restart: unless-stopped
+      dockerfile: Dockerfile.cuda
+      args:
+        CUDA_IMAGE: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+        TORCH_VERSION: 2.5.1
+        TORCHAUDIO_VERSION: 2.5.1
+        PYTORCH_CUDA_FLAVOR: cu118
+    restart: always
     env_file:
       - .env
     environment:
@@ -13,8 +18,22 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     ports:
       - "${HOST_PORT:-7474}:${UVICORN_PORT:-7474}"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: ["gpu"]
+    labels:
+      # autoheal (~/git/autoheal) restarts this container when unhealthy.
+      - autoheal=true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${UVICORN_PORT:-7474}/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  hf-cache:

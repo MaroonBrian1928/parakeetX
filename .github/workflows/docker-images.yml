@@ -32,10 +32,14 @@ jobs:
             build-args: |
               UV_TORCH_INSTALL_FLAGS=--no-cache
           - variant: cuda-legacy
-            dockerfile: Dockerfile.cuda-legacy
+            dockerfile: Dockerfile.cuda
             cache-mode: min
             build-args: |
               UV_TORCH_INSTALL_FLAGS=--no-cache
+              CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+              TORCH_VERSION=2.5.1
+              TORCHAUDIO_VERSION=2.5.1
+              PYTORCH_CUDA_FLAVOR=cu118
 
     steps:
       - name: Check out repository

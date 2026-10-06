@@ -39,10 +39,6 @@ class DiarizationModelManager:
             unload=self.unload_model,
         )
 
-    @property
-    def configured_model_name(self) -> str:
-        return self._settings.model_name
-
     def status(self) -> dict[str, Any]:
         return {
             "loaded": self._is_loaded(),
@@ -128,14 +124,7 @@ class DiarizationModelManager:
         with self._lock:
             self._pipeline = None
             self._idle_evictor.cancel()
-            if self._settings.device.startswith("cuda"):
-                try:
-                    import torch
-
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-        release_memory_to_os()
+        release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
         return self.status()
 
     def diarize(
@@ -157,51 +146,14 @@ class DiarizationModelManager:
                 self._worker_loaded = True
                 return result
 
-        with self._idle_evictor.use():
-            pipeline = self._pipeline
-            if pipeline is None:
-                self.load_model()
-                pipeline = self._pipeline
-
-            if pipeline is None:
-                raise RuntimeError("Diarization model failed to load")
-
-            kwargs: dict[str, Any] = {}
-            if min_speakers is not None:
-                kwargs["min_speakers"] = min_speakers
-            if max_speakers is not None:
-                kwargs["max_speakers"] = max_speakers
-            if num_speakers is not None:
-                kwargs["num_speakers"] = num_speakers
-
-            annotation = self._run_pipeline(pipeline, audio_path, kwargs)
-
-            iterable_annotation = annotation
-            if not hasattr(iterable_annotation, "itertracks"):
-                wrapped = getattr(annotation, "speaker_diarization", None)
-                if wrapped is not None and hasattr(wrapped, "itertracks"):
-                    iterable_annotation = wrapped
-
-            if not hasattr(iterable_annotation, "itertracks"):
-                raise RuntimeError(
-                    f"Unsupported diarization output type: {type(annotation).__name__}"
-                )
-
-            try:
-                diarization_segments: list[dict[str, Any]] = []
-                for segment, _, speaker in iterable_annotation.itertracks(yield_label=True):
-                    diarization_segments.append(
-                        {
-                            "start": float(segment.start),
-                            "end": float(segment.end),
-                            "speaker": str(speaker),
-                        }
-                    )
-
-                return diarization_segments
-            finally:
-                del annotation
-                del iterable_annotation
+        waveform, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+        return self._diarize_waveform(
+            waveform,
+            int(sample_rate),
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            num_speakers=num_speakers,
+        )
 
     def diarize_regions(
         self,
@@ -295,7 +247,33 @@ class DiarizationModelManager:
         if not compact_chunks:
             return []
 
-        compact_audio = np.concatenate(compact_chunks, axis=0)
+        compact_segments = self._diarize_waveform(
+            np.concatenate(compact_chunks, axis=0),
+            sample_rate,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            num_speakers=num_speakers,
+        )
+        return _map_compact_diarization_to_original(compact_segments, mapping)
+
+    def _diarize_waveform(
+        self,
+        waveform: np.ndarray,
+        sample_rate: int,
+        *,
+        min_speakers: int | None,
+        max_speakers: int | None,
+        num_speakers: int | None,
+    ) -> list[dict[str, Any]]:
+        kwargs = {
+            name: value
+            for name, value in (
+                ("min_speakers", min_speakers),
+                ("max_speakers", max_speakers),
+                ("num_speakers", num_speakers),
+            )
+            if value is not None
+        }
 
         with self._idle_evictor.use():
             pipeline = self._pipeline
@@ -305,43 +283,19 @@ class DiarizationModelManager:
             if pipeline is None:
                 raise RuntimeError("Diarization model failed to load")
 
-            kwargs: dict[str, Any] = {}
-            if min_speakers is not None:
-                kwargs["min_speakers"] = min_speakers
-            if max_speakers is not None:
-                kwargs["max_speakers"] = max_speakers
-            if num_speakers is not None:
-                kwargs["num_speakers"] = num_speakers
-
-            annotation = self._run_pipeline(
-                pipeline,
-                None,
-                kwargs,
-                waveform=compact_audio,
-                sample_rate=sample_rate,
-            )
-
-            iterable_annotation = annotation
-            if not hasattr(iterable_annotation, "itertracks"):
-                wrapped = getattr(annotation, "speaker_diarization", None)
-                if wrapped is not None and hasattr(wrapped, "itertracks"):
-                    iterable_annotation = wrapped
-            if not hasattr(iterable_annotation, "itertracks"):
+            annotation = self._run_pipeline(pipeline, waveform, sample_rate, kwargs)
+            # pyannote 4 wraps the Annotation in a DiarizeOutput.
+            if not hasattr(annotation, "itertracks"):
+                annotation = getattr(annotation, "speaker_diarization", annotation)
+            if not hasattr(annotation, "itertracks"):
                 raise RuntimeError(
                     f"Unsupported diarization output type: {type(annotation).__name__}"
                 )
 
-            compact_segments: list[dict[str, Any]] = []
-            for segment, _, speaker in iterable_annotation.itertracks(yield_label=True):
-                compact_segments.append(
-                    {
-                        "start": float(segment.start),
-                        "end": float(segment.end),
-                        "speaker": str(speaker),
-                    }
-                )
-
-        return _map_compact_diarization_to_original(compact_segments, mapping)
+            return [
+                {"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)}
+                for segment, _, speaker in annotation.itertracks(yield_label=True)
+            ]
 
     def _is_loaded(self) -> bool:
         if self._worker_client is not None:
@@ -366,29 +320,15 @@ class DiarizationModelManager:
     def _run_pipeline(
         self,
         pipeline: Any,
-        audio_path: Path | None,
+        waveform: np.ndarray,
+        sample_rate: int,
         kwargs: dict[str, Any],
-        *,
-        waveform: np.ndarray | None = None,
-        sample_rate: int | None = None,
     ) -> Any:
-        if waveform is None:
-            if audio_path is None:
-                raise ValueError("_run_pipeline requires audio_path or waveform")
-            file_waveform, file_sample_rate = sf.read(
-                str(audio_path), dtype="float32", always_2d=True
-            )
-            mono = np.asarray(file_waveform, dtype=np.float32).mean(axis=1)
-            sample_rate = int(file_sample_rate)
-        else:
-            mono = np.asarray(waveform, dtype=np.float32)
-            if mono.ndim == 2:
-                mono = mono.mean(axis=1)
-            if sample_rate is None:
-                raise ValueError("sample_rate required when passing waveform")
-
         import torch
 
+        mono = np.asarray(waveform, dtype=np.float32)
+        if mono.ndim == 2:
+            mono = mono.mean(axis=1)
         audio_input = {
             "waveform": torch.from_numpy(mono).unsqueeze(0),
             "sample_rate": int(sample_rate),

@@ -13,8 +13,13 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     ports:
       - "${HOST_PORT:-7474}:${UVICORN_PORT:-7474}"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: ["gpu"]
+
+volumes:
+  hf-cache:

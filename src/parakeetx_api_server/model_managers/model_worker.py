@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import DiarizationSettings, ParakeetSettings, Settings
+from ..memory import release_memory_to_os
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +29,6 @@ class ModelWorkerClient:
     def is_running(self) -> bool:
         process = self._process
         return process is not None and process.is_alive()
-
-    def parakeet_status(self) -> dict[str, Any]:
-        if not self.is_running:
-            return _unloaded_status(self._settings_payload["parakeet"])
-        return self._request("parakeet_status")
 
     def load_parakeet(self) -> dict[str, Any]:
         return self._request("load_parakeet")
@@ -70,13 +66,6 @@ class ModelWorkerClient:
                 "language": language,
             },
         )
-
-    def diarization_status(self) -> dict[str, Any]:
-        if not self.is_running:
-            payload = _unloaded_status(self._settings_payload["diarization"])
-            payload["requires_hf_token"] = True
-            return payload
-        return self._request("diarization_status")
 
     def load_diarization(self) -> dict[str, Any]:
         return self._request("load_diarization")
@@ -226,18 +215,6 @@ def _model_worker_main(
         "diarize_regions",
     }
 
-    def _release_cuda_cache() -> None:
-        try:
-            import gc
-
-            import torch
-
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as exc:
-            logger.warning("CUDA cache release failed: %s", exc)
-
     try:
         while True:
             command, payload = connection.recv()
@@ -260,9 +237,7 @@ def _model_worker_main(
                         idle_evict_minutes=None,
                     )
 
-                if command == "parakeet_status":
-                    result = parakeet_manager.status()
-                elif command == "load_parakeet":
+                if command == "load_parakeet":
                     result = parakeet_manager.load_model()
                 elif command == "unload_parakeet":
                     result = parakeet_manager.unload_model()
@@ -277,8 +252,6 @@ def _model_worker_main(
                         payload.get("regions", []),
                         language=payload.get("language"),
                     )
-                elif command == "diarization_status":
-                    result = diarization_manager.status()
                 elif command == "load_diarization":
                     result = diarization_manager.load_model()
                 elif command == "unload_diarization":
@@ -306,7 +279,7 @@ def _model_worker_main(
                 else:
                     raise RuntimeError(f"Unknown model worker command: {command}")
                 if empty_cache_after_stage and command in stage_commands:
-                    _release_cuda_cache()
+                    release_memory_to_os(clear_cuda=True)
                 connection.send((True, result))
             except Exception as exc:
                 logger.exception("Model worker command failed: %s", command)

@@ -3,25 +3,45 @@ from __future__ import annotations
 from typing import Any
 
 
-def _overlap(start_a: float, end_a: float, start_b: float, end_b: float) -> float:
-    return max(0.0, min(end_a, end_b) - max(start_a, start_b))
-
-
-def _best_speaker(
-    start: float,
-    end: float,
+def _assign_best_speaker(
+    items: list[dict[str, Any]],
     diarization_segments: list[dict[str, Any]],
-) -> str | None:
-    best_label: str | None = None
-    best_score = 0.0
+) -> None:
+    """Label each item with the speaker whose segment overlaps it most.
 
-    for segment in diarization_segments:
-        score = _overlap(start, end, float(segment["start"]), float(segment["end"]))
-        if score > best_score:
-            best_score = score
-            best_label = str(segment["speaker"])
+    Sweeps items and segments in time order so each item only compares against
+    segments still active around it. Ties go to the earliest segment in
+    ``diarization_segments`` order.
+    """
+    segments = sorted(
+        (
+            (float(s["start"]), float(s["end"]), index, str(s["speaker"]))
+            for index, s in enumerate(diarization_segments)
+        ),
+        key=lambda s: s[0],
+    )
+    order = sorted(range(len(items)), key=lambda i: float(items[i].get("start", 0.0)))
 
-    return best_label
+    active: list[tuple[float, float, int, str]] = []
+    next_segment = 0
+    for i in order:
+        item = items[i]
+        start = float(item.get("start", 0.0))
+        end = float(item.get("end", 0.0))
+
+        while next_segment < len(segments) and segments[next_segment][0] < end:
+            active.append(segments[next_segment])
+            next_segment += 1
+        active = [s for s in active if s[1] > start]
+
+        best: tuple[float, int, str] | None = None
+        for seg_start, seg_end, index, speaker in active:
+            score = min(end, seg_end) - max(start, seg_start)
+            if score > 0 and (best is None or score > best[0] or (score == best[0] and index < best[1])):
+                best = (score, index, speaker)
+
+        if best is not None:
+            item["speaker"] = best[2]
 
 
 def assign_speakers(
@@ -29,22 +49,6 @@ def assign_speakers(
     segments: list[dict[str, Any]],
     diarization_segments: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    for word in words:
-        speaker = _best_speaker(
-            float(word.get("start", 0.0)),
-            float(word.get("end", 0.0)),
-            diarization_segments,
-        )
-        if speaker is not None:
-            word["speaker"] = speaker
-
-    for segment in segments:
-        speaker = _best_speaker(
-            float(segment.get("start", 0.0)),
-            float(segment.get("end", 0.0)),
-            diarization_segments,
-        )
-        if speaker is not None:
-            segment["speaker"] = speaker
-
+    _assign_best_speaker(words, diarization_segments)
+    _assign_best_speaker(segments, diarization_segments)
     return words, segments

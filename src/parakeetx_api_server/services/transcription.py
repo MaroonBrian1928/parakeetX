@@ -59,19 +59,6 @@ class TranscriptionService:
         self._inflight_lock = asyncio.Lock()
         self._inflight: dict[_TranscriptionRequestKey, asyncio.Task[dict[str, Any]]] = {}
 
-    @staticmethod
-    def _release_cuda_cache() -> None:
-        try:
-            import gc
-
-            import torch
-
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-
     @property
     def configured_model_name(self) -> str:
         return self._parakeet_manager.configured_model_name
@@ -261,7 +248,7 @@ class TranscriptionService:
                 ),
             )
             if self._empty_cuda_cache_after_stage:
-                self._release_cuda_cache()
+                release_memory_to_os(clear_cuda=True)
 
             if forced_alignment and self._forced_alignment_manager.settings.method == "qwen":
                 if self._unload_asr_before_forced_alignment:
@@ -289,7 +276,7 @@ class TranscriptionService:
                     extra=("method=qwen " f"words={len(asr_payload.get('words', []))}"),
                 )
                 if self._empty_cuda_cache_after_stage:
-                    self._release_cuda_cache()
+                    release_memory_to_os(clear_cuda=True)
             elif forced_alignment:
                 _emit_stage_timing(
                     "forced_alignment",
@@ -337,10 +324,11 @@ class TranscriptionService:
                     ),
                 )
                 if self._empty_cuda_cache_after_stage:
-                    self._release_cuda_cache()
+                    release_memory_to_os(clear_cuda=True)
 
             stage_started = time.perf_counter()
-            words, segments = assign_speakers(
+            words, segments = await asyncio.to_thread(
+                assign_speakers,
                 list(asr_payload.get("words", [])),
                 list(asr_payload.get("segments", [])),
                 diarization_segments,

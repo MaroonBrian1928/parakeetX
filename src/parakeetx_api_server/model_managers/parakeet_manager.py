@@ -200,14 +200,7 @@ class ParakeetModelManager:
         with self._lock:
             self._model = None
             self._idle_evictor.cancel()
-            if self._settings.device.startswith("cuda"):
-                try:
-                    import torch
-
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-        release_memory_to_os()
+        release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
         return self.status()
 
     def transcribe(
@@ -381,15 +374,6 @@ class ParakeetModelManager:
         finally:
             release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
 
-    def _transcribe_regions_local(
-        self,
-        audio_path: Path,
-        regions: list[dict[str, Any]],
-        *,
-        language: str | None = None,
-    ) -> dict[str, Any]:
-        return self.transcribe_regions(audio_path, regions, language=language)
-
     def _is_loaded(self) -> bool:
         if self._worker_client is not None:
             return self._worker_loaded
@@ -399,57 +383,31 @@ class ParakeetModelManager:
         return self._resolve_chunk_plan(audio_path)["chunk_seconds"]
 
     def _resolve_chunk_plan(self, audio_path: Path) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "duration_seconds": _audio_duration_seconds(audio_path),
+            "gpu_name": None,
+            "free_gib": None,
+            "total_gib": None,
+        }
+        duration_seconds = base["duration_seconds"]
+
         if not self._settings.device.startswith("cuda"):
-            return {
-                "chunk_seconds": None,
-                "reason": "non_cuda_device",
-                "duration_seconds": _audio_duration_seconds(audio_path),
-                "chunk_policy": "non_cuda",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
+            return {**base, "chunk_seconds": None, "reason": "non_cuda_device", "chunk_policy": "non_cuda"}
         if not self._settings.cuda_adaptive_chunking:
-            return {
-                "chunk_seconds": None,
-                "reason": "adaptive_chunking_disabled",
-                "duration_seconds": _audio_duration_seconds(audio_path),
-                "chunk_policy": "disabled",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
+            return {**base, "chunk_seconds": None, "reason": "adaptive_chunking_disabled", "chunk_policy": "disabled"}
 
-        duration_seconds = _audio_duration_seconds(audio_path)
-
-        if (
-            self._settings.cuda_chunk_seconds_override is not None
-            and self._settings.cuda_chunk_seconds_override > 0
-        ):
-            chunk_seconds = self._settings.cuda_chunk_seconds_override
+        override = self._settings.cuda_chunk_seconds_override
+        if override is not None and override > 0:
+            chunk_seconds = override
             if duration_seconds > 0:
                 chunk_seconds = min(chunk_seconds, int(max(1.0, duration_seconds)))
-            return {
-                "chunk_seconds": max(1, int(chunk_seconds)),
-                "reason": "override",
-                "duration_seconds": duration_seconds,
-                "chunk_policy": "override",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
+            return {**base, "chunk_seconds": max(1, int(chunk_seconds)), "reason": "override", "chunk_policy": "override"}
 
         available_gib, total_gib, gpu_name = self._cuda_memory_snapshot()
+        base.update(gpu_name=gpu_name, total_gib=total_gib)
         if available_gib is None:
-            return {
-                "chunk_seconds": None,
-                "reason": "memory_probe_failed",
-                "duration_seconds": duration_seconds,
-                "chunk_policy": "unknown",
-                "gpu_name": gpu_name,
-                "free_gib": None,
-                "total_gib": total_gib,
-            }
+            return {**base, "chunk_seconds": None, "reason": "memory_probe_failed", "chunk_policy": "unknown"}
+        base["free_gib"] = available_gib
 
         chunk_seconds = _chunk_seconds_for_available_gib(available_gib)
         chunk_seconds = max(self._settings.cuda_chunk_min_seconds, chunk_seconds)
@@ -458,25 +416,9 @@ class ParakeetModelManager:
         if duration_seconds > 0:
             chunk_seconds = min(chunk_seconds, int(max(1.0, duration_seconds)))
             if duration_seconds <= float(chunk_seconds):
-                return {
-                    "chunk_seconds": None,
-                    "reason": "audio_shorter_than_chunk",
-                    "duration_seconds": duration_seconds,
-                    "chunk_policy": "memory_only",
-                    "gpu_name": gpu_name,
-                    "free_gib": available_gib,
-                    "total_gib": total_gib,
-                }
+                return {**base, "chunk_seconds": None, "reason": "audio_shorter_than_chunk", "chunk_policy": "memory_only"}
 
-        return {
-            "chunk_seconds": max(1, int(chunk_seconds)),
-            "reason": "adaptive",
-            "duration_seconds": duration_seconds,
-            "chunk_policy": "memory_only",
-            "gpu_name": gpu_name,
-            "free_gib": available_gib,
-            "total_gib": total_gib,
-        }
+        return {**base, "chunk_seconds": max(1, int(chunk_seconds)), "reason": "adaptive", "chunk_policy": "memory_only"}
 
     def _log_chunk_plan(self, audio_path: Path, plan: dict[str, Any]) -> None:
         message = (
@@ -972,5 +914,3 @@ def _ensure_safetensors_weights(ckpt_path: Path) -> Path:
 
     logger.info("Wrote safetensors weights at %s.", safetensors_path)
     return safetensors_path
-
-    return MMapSaveRestoreConnector()
