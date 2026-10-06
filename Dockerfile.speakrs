@@ -1,13 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
 # Artifact image for the speakrs diarization backend, consumed by Dockerfile.cuda via
-# SPEAKRS_IMAGE. Built locally and pushed to GHCR (`mise run speakrs-image`) because the
-# sm_52 ONNX Runtime build takes ~45 minutes.
+# SPEAKRS_IMAGE and SPEAKRS_VARIANT. Built locally and pushed to GHCR (`mise run
+# speakrs-image`) because the sm_52 ONNX Runtime build takes ~45 minutes.
 #
-#   /opt/speakrs/bin/speakrs-diarize  CLI, loads ONNX Runtime dynamically (ORT_DYLIB_PATH)
-#   /opt/speakrs/models/              speakrs ONNX models at a pinned revision
-#   /opt/speakrs/ort-cuda12/lib/      official ONNX Runtime GPU build (sm_60+)
-#   /opt/speakrs/ort-sm52/lib/        ONNX Runtime built from source for Maxwell (sm_52)
+#   /opt/speakrs/models/                 speakrs ONNX models at a pinned revision
+#   /opt/speakrs/cuda12/bin/speakrs-diarize  CLI on unmodified upstream speakrs
+#   /opt/speakrs/cuda12/ort/lib/         official ONNX Runtime GPU build (sm_60+)
+#   /opt/speakrs/sm52/bin/speakrs-diarize    CLI on speakrs patched for ONNX Runtime 1.20
+#   /opt/speakrs/sm52/ort/lib/           ONNX Runtime built from source for Maxwell (sm_52)
+#
+# The CLIs load ONNX Runtime dynamically (ORT_DYLIB_PATH).
 
 ARG CUDA_DEVEL_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
@@ -33,9 +36,9 @@ RUN cd onnxruntime && ./build.sh --config Release --build_shared_lib --parallel 
       --use_preinstalled_eigen --eigen_path /build/eigen --disable_contrib_ops --compile_no_warning_as_error \
       --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=52 onnxruntime_BUILD_UNIT_TESTS=OFF \
         onnxruntime_USE_FLASH_ATTENTION=OFF onnxruntime_USE_MEMORY_EFFICIENT_ATTENTION=OFF \
-    && mkdir -p /opt/speakrs/ort-sm52/lib \
+    && mkdir -p /opt/speakrs/sm52/ort/lib \
     && cp -a build/Linux/Release/libonnxruntime.so* build/Linux/Release/libonnxruntime_providers_*.so \
-      /opt/speakrs/ort-sm52/lib/
+      /opt/speakrs/sm52/ort/lib/
 
 FROM ${CUDA_DEVEL_IMAGE} AS ort-cuda12
 ARG ORT_CUDA12_VERSION=1.28.3
@@ -60,20 +63,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 
 FROM ${CUDA_DEVEL_IMAGE} AS cli
 ARG SPEAKRS_COMMIT=ab98f35
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git build-essential pkg-config \
+# libssl-dev: upstream speakrs keeps ort's default features, whose build script uses native TLS.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git build-essential pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH=/root/.cargo/bin:${PATH}
 WORKDIR /build
 RUN git clone -q https://github.com/avencera/speakrs.git speakrs-src && git -C speakrs-src checkout -q ${SPEAKRS_COMMIT}
-COPY speakrs/speakrs-maxwell.patch ./
-RUN git -C speakrs-src apply ../speakrs-maxwell.patch
 COPY speakrs/diarize ./diarize
-RUN cd diarize && cargo build --release --locked \
-    && mkdir -p /opt/speakrs/bin && cp target/release/speakrs-diarize /opt/speakrs/bin/
+# Upstream speakrs pulls in ort's download/TLS build dependencies, hence its own lockfile.
+RUN cd diarize && cp Cargo.upstream.lock Cargo.lock && cargo build --release --locked \
+    && mkdir -p /opt/speakrs/cuda12/bin && cp target/release/speakrs-diarize /opt/speakrs/cuda12/bin/
+COPY speakrs/speakrs-maxwell.patch ./
+COPY speakrs/diarize/Cargo.lock ./diarize/Cargo.lock
+RUN git -C speakrs-src apply ../speakrs-maxwell.patch \
+    && cd diarize && cargo build --release --locked \
+    && mkdir -p /opt/speakrs/sm52/bin && cp target/release/speakrs-diarize /opt/speakrs/sm52/bin/
 
 FROM scratch
-COPY --from=cli /opt/speakrs/bin /opt/speakrs/bin
 COPY --from=models /opt/speakrs/models /opt/speakrs/models
-COPY --from=ort-cuda12 /opt/speakrs/ort-cuda12 /opt/speakrs/ort-cuda12
-COPY --from=ort-sm52 /opt/speakrs/ort-sm52 /opt/speakrs/ort-sm52
+COPY --from=cli /opt/speakrs/cuda12/bin /opt/speakrs/cuda12/bin
+COPY --from=ort-cuda12 /opt/speakrs/ort-cuda12 /opt/speakrs/cuda12/ort
+COPY --from=cli /opt/speakrs/sm52/bin /opt/speakrs/sm52/bin
+COPY --from=ort-sm52 /opt/speakrs/sm52/ort /opt/speakrs/sm52/ort

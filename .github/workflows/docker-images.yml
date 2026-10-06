@@ -40,7 +40,7 @@ jobs:
               TORCH_VERSION=2.5.1
               TORCHAUDIO_VERSION=2.5.1
               PYTORCH_CUDA_FLAVOR=cu118
-              SPEAKRS_ORT=sm52
+              SPEAKRS_VARIANT=sm52
 
     steps:
       - name: Check out repository

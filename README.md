@@ -222,7 +222,7 @@ Published image tags:
 - `ghcr.io/maroonbrian1928/parakeetx:cuda`: CUDA 12.8 / PyTorch cu128 runtime for RTX 50-series / Blackwell and newer supported CUDA GPUs.
 - `ghcr.io/maroonbrian1928/parakeetx:cuda-legacy`: CUDA 12.4 / PyTorch cu118 runtime for older GPUs such as TITAN X / Maxwell that are not covered by newer PyTorch cu128 wheels.
 
-Both CUDA images copy the speakrs diarization backend from `ghcr.io/maroonbrian1928/parakeetx-speakrs`, built from `Dockerfile.speakrs`. It carries the official ONNX Runtime GPU build for `cuda` and an ONNX Runtime built from source for Maxwell (sm_52) for `cuda-legacy`. That build takes ~45 minutes, so the image is built locally and pushed with `mise run speakrs-image` rather than in CI. To repackage without recompiling ONNX Runtime, pass already-built libraries as the `ort-sm52` stage: `--build-context ort-sm52=<dir containing opt/speakrs/ort-sm52/lib>`.
+Both CUDA images copy the speakrs diarization backend from `ghcr.io/maroonbrian1928/parakeetx-speakrs`, built from `Dockerfile.speakrs`. `cuda` gets unmodified upstream speakrs on the official ONNX Runtime GPU build. `cuda-legacy` gets speakrs patched for ONNX Runtime 1.20 (`speakrs/speakrs-maxwell.patch`) on an ONNX Runtime built from source for Maxwell (sm_52). That ONNX Runtime build takes ~45 minutes, so the image is built locally and pushed with `mise run speakrs-image` rather than in CI. To repackage without recompiling ONNX Runtime, reuse a published image as the `ort-sm52` stage: `--build-context ort-sm52=docker-image://ghcr.io/maroonbrian1928/parakeetx-speakrs:v2`.
 
 Build CPU image:
 

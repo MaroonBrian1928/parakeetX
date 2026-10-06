@@ -21,7 +21,7 @@ run = "uv lock"
 [tasks.speakrs-image]
 description = "Build and push the speakrs artifact image (Dockerfile.speakrs; ~45 min sm_52 ONNX Runtime build)"
 run = """
-tag=ghcr.io/maroonbrian1928/parakeetx-speakrs:ort1.20.1-sm52
+tag=ghcr.io/maroonbrian1928/parakeetx-speakrs:v2
 docker build -f Dockerfile.speakrs -t "$tag" \
   --label org.opencontainers.image.source=https://github.com/MaroonBrian1928/parakeetX \
   --label "org.opencontainers.image.description=speakrs diarization CLI, models and ONNX Runtime (incl. sm_52 build) for ParakeetX" .
