@@ -10,6 +10,8 @@ services:
     environment:
       PARAKEET__DEVICE: cpu
       DIARIZATION__DEVICE: cpu
+      # speakrs ships only in the CUDA images.
+      DIARIZATION__BACKEND: pyannote
     ports:
       - "${HOST_PORT:-7474}:${UVICORN_PORT:-7474}"
     volumes:

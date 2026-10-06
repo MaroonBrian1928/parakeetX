@@ -41,7 +41,7 @@ def test_diarization_uses_waveform_input(monkeypatch, tmp_path: Path) -> None:
     fake_torch = type("FakeTorch", (), {"from_numpy": lambda self, value: FakeTensor()})()
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
-    manager = DiarizationModelManager(DiarizationSettings(), hf_token="token")
+    manager = DiarizationModelManager(DiarizationSettings(backend="pyannote"), hf_token="token")
     manager._pipeline = FakePipeline()
 
     result = manager.diarize(audio_path, min_speakers=1)
@@ -90,6 +90,7 @@ def test_load_model_applies_configured_pyannote_batch_sizes(monkeypatch) -> None
 
     manager = DiarizationModelManager(
         DiarizationSettings(
+            backend="pyannote",
             device="cuda",
             segmentation_batch_size=128,
             embedding_batch_size=64,
@@ -213,7 +214,7 @@ def test_diarize_regions_compacts_speech_once_and_remaps(monkeypatch, tmp_path: 
     sf.write(str(audio_path), samples, 16000)
     calls: list[object] = []
 
-    manager = DiarizationModelManager(DiarizationSettings(), hf_token="token")
+    manager = DiarizationModelManager(DiarizationSettings(backend="pyannote"), hf_token="token")
 
     class FakeAnnotation:
         def itertracks(self, yield_label: bool):
@@ -261,7 +262,7 @@ def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
     samples = np.zeros(10 * 16000, dtype=np.float32)
     sf.write(str(audio_path), samples, 16000)
 
-    manager = DiarizationModelManager(DiarizationSettings(), hf_token="token")
+    manager = DiarizationModelManager(DiarizationSettings(backend="pyannote"), hf_token="token")
     calls: list[Path] = []
 
     def fake_diarize(path, *, min_speakers, max_speakers, num_speakers):

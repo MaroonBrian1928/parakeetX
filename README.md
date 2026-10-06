@@ -171,7 +171,7 @@ Core env vars:
 - `PARAKEET__CUDA_CHUNK_OVERLAP_SECONDS`
 - `PARAKEET__USE_EXTRACTED_NEMO_CACHE`
 - `PARAKEET__TORCH_LOAD_MMAP`
-- `DIARIZATION__BACKEND` (`pyannote` default, or `speakrs`: the same community-1 models on ONNX Runtime, ~2x faster, no `HF_TOKEN`; CUDA images only)
+- `DIARIZATION__BACKEND`: `speakrs` (default; pyannote community-1's models on ONNX Runtime, ~2x faster, no `HF_TOKEN`, ships only in the CUDA images) or `pyannote`. The CPU image always uses `pyannote`; set it explicitly when running outside Docker.
 - `DIARIZATION__MODEL_NAME`
 - `DIARIZATION__DEVICE`
 - `DIARIZATION__PRELOAD_MODEL`

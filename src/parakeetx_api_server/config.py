@@ -52,7 +52,7 @@ class ParakeetSettings(BaseModel):
 
 
 class DiarizationSettings(BaseModel):
-    backend: str = "pyannote"
+    backend: str = "speakrs"
     model_name: str = "pyannote/speaker-diarization-community-1"
     device: str = "cpu"
     preload_model: bool = False
