@@ -1,0 +1,39 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index d8ce375..209dc86 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -51,7 +51,7 @@ ndarray-linalg-static = { package = "ndarray-linalg", version = "0.18.1", featur
+ ndarray-linalg-system = { package = "ndarray-linalg", version = "0.18.1", features = ["openblas-system"], optional = true }
+ ndarray-npy = "0.10.0"
+ 
+-ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
++ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "tracing", "api-18"] }
+ libloading = { version = "0.9.0", optional = true }
+ 
+ # logging
+diff --git a/src/inference.rs b/src/inference.rs
+index fa1efbe..3a509f9 100644
+--- a/src/inference.rs
++++ b/src/inference.rs
+@@ -315,7 +315,7 @@ pub fn with_execution_mode(
+                     .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Exhaustive)
+                     .with_conv_max_workspace(true)
+                     .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
+-                    .with_prefer_nhwc(true)
++                    .with_prefer_nhwc(false)
+                     .build()
+                     .error_on_failure()])?)
+             }
+diff --git a/src/inference/embedding/session.rs b/src/inference/embedding/session.rs
+index 13b0a79..7206cae 100644
+--- a/src/inference/embedding/session.rs
++++ b/src/inference/embedding/session.rs
+@@ -55,7 +55,7 @@ impl EmbeddingModel {
+             .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Exhaustive)
+             .with_conv_max_workspace(true)
+             .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
+-            .with_prefer_nhwc(true)
++            .with_prefer_nhwc(false)
+             .with_cuda_graph(true)
+             .build()
+             .error_on_failure()])?)

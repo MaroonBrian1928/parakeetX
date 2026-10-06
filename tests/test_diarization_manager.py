@@ -5,6 +5,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from parakeetx_api_server.config import DiarizationSettings
@@ -281,3 +282,44 @@ def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
 
     assert segments == [{"start": 0.25, "end": 0.75, "speaker": "SPEAKER_00"}]
     assert calls == [audio_path]
+
+
+def _fake_speakrs_home(tmp_path: Path, script_body: str) -> Path:
+    home = tmp_path / "speakrs"
+    (home / "bin").mkdir(parents=True)
+    binary = home / "bin" / "speakrs-diarize"
+    binary.write_text("#!/bin/sh\n" + script_body)
+    binary.chmod(0o755)
+    return home
+
+
+def test_speakrs_backend_runs_binary_and_parses_rttm(tmp_path: Path) -> None:
+    home = _fake_speakrs_home(
+        tmp_path,
+        'test "$1" = cuda || exit 3\n'
+        f'test "$2" = "{tmp_path}/speakrs/models" || exit 4\n'
+        f'test "$ORT_DYLIB_PATH" = "{tmp_path}/speakrs/ort/lib/libonnxruntime.so" || exit 5\n'
+        'echo "SPEAKER audio 1 0.500 1.250 <NA> <NA> SPEAKER_00 <NA> <NA>"\n'
+        'echo "SPEAKER audio 1 2.000 0.500 <NA> <NA> SPEAKER_01 <NA> <NA>"\n',
+    )
+    manager = DiarizationModelManager(
+        DiarizationSettings(backend="speakrs", device="cuda", speakrs_home=str(home)),
+        hf_token=None,
+    )
+
+    assert manager.load_model()["requires_hf_token"] is False
+    assert manager.diarize(tmp_path / "audio.wav") == [
+        {"start": 0.5, "end": 1.75, "speaker": "SPEAKER_00"},
+        {"start": 2.0, "end": 2.5, "speaker": "SPEAKER_01"},
+    ]
+
+
+def test_speakrs_backend_failure_raises_runtime_error(tmp_path: Path) -> None:
+    home = _fake_speakrs_home(tmp_path, 'echo "no kernel image" >&2\nexit 1\n')
+    manager = DiarizationModelManager(
+        DiarizationSettings(backend="speakrs", device="cuda", speakrs_home=str(home)),
+        hf_token=None,
+    )
+
+    with pytest.raises(RuntimeError, match="no kernel image"):
+        manager.diarize(tmp_path / "audio.wav")

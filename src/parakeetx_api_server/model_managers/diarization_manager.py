@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -44,12 +47,13 @@ class DiarizationModelManager:
     def status(self) -> dict[str, Any]:
         return {
             "loaded": self._is_loaded(),
+            "backend": self._settings.backend,
             "model_name": self._settings.model_name,
             "device": self._settings.device,
             "segmentation_batch_size": self._settings.segmentation_batch_size,
             "embedding_batch_size": self._settings.embedding_batch_size,
             "idle_evict_minutes": self._idle_evictor.idle_minutes,
-            "requires_hf_token": True,
+            "requires_hf_token": self._settings.backend == "pyannote",
         }
 
     def load_model(self) -> dict[str, Any]:
@@ -59,6 +63,12 @@ class DiarizationModelManager:
             self._idle_evictor.note_loaded()
             status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
             return status
+
+        if self._settings.backend == "speakrs":
+            # speakrs runs as a subprocess per request; there is nothing to keep resident.
+            if not self._speakrs_binary().is_file():
+                raise RuntimeError(f"speakrs-diarize not found at {self._speakrs_binary()}")
+            return self.status()
 
         if not self._hf_token:
             raise RuntimeError("HF_TOKEN is required to load diarization model")
@@ -149,6 +159,14 @@ class DiarizationModelManager:
                 )
                 self._worker_loaded = True
                 return result
+
+        if self._settings.backend == "speakrs":
+            return self._run_speakrs(
+                audio_path,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                num_speakers=num_speakers,
+            )
 
         waveform, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
         return self._diarize_waveform(
@@ -269,6 +287,17 @@ class DiarizationModelManager:
         max_speakers: int | None,
         num_speakers: int | None,
     ) -> list[dict[str, Any]]:
+        if self._settings.backend == "speakrs":
+            with tempfile.TemporaryDirectory(prefix="parakeetx-speakrs-") as tmpdir:
+                wav_path = Path(tmpdir) / "audio.wav"
+                sf.write(str(wav_path), waveform, sample_rate, format="WAV", subtype="PCM_16")
+                return self._run_speakrs(
+                    wav_path,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    num_speakers=num_speakers,
+                )
+
         kwargs = {
             name: value
             for name, value in (
@@ -300,6 +329,46 @@ class DiarizationModelManager:
                 {"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)}
                 for segment, _, speaker in annotation.itertracks(yield_label=True)
             ]
+
+    def _speakrs_binary(self) -> Path:
+        return Path(self._settings.speakrs_home) / "bin" / "speakrs-diarize"
+
+    def _run_speakrs(
+        self,
+        audio_path: Path,
+        *,
+        min_speakers: int | None,
+        max_speakers: int | None,
+        num_speakers: int | None,
+    ) -> list[dict[str, Any]]:
+        if any(value is not None for value in (min_speakers, max_speakers, num_speakers)):
+            logger.warning("speakrs diarization ignores min_speakers/max_speakers/num_speakers.")
+
+        home = Path(self._settings.speakrs_home)
+        ort_lib = home / "ort" / "lib"
+        mode = "cuda" if self._settings.device.startswith("cuda") else "cpu"
+        env = {
+            **os.environ,
+            "ORT_DYLIB_PATH": str(ort_lib / "libonnxruntime.so"),
+            "LD_LIBRARY_PATH": os.pathsep.join(
+                filter(None, [str(ort_lib), os.environ.get("LD_LIBRARY_PATH")])
+            ),
+        }
+        command = [str(self._speakrs_binary()), mode, str(home / "models"), str(audio_path)]
+
+        started = time.perf_counter()
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, env=env)
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"speakrs-diarize not found at {command[0]}") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"speakrs diarization failed: {completed.stderr.strip()[-2000:]}")
+        print(
+            f"Diarization timing: backend=speakrs mode={mode} elapsed={time.perf_counter() - started:.2f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _parse_rttm(completed.stdout)
 
     def _is_loaded(self) -> bool:
         if self._worker_client is not None:
@@ -433,6 +502,17 @@ def _wrap_forward_with_dtype_cast(model: Any) -> None:
         return original_forward(*cast_args, **cast_kwargs)
 
     model.forward = _wrapped_forward
+
+
+def _parse_rttm(rttm: str) -> list[dict[str, Any]]:
+    # SPEAKER <file> <channel> <start> <duration> <NA> <NA> <speaker> <NA> <NA>
+    segments = []
+    for line in rttm.splitlines():
+        fields = line.split()
+        if len(fields) >= 8 and fields[0] == "SPEAKER":
+            start = float(fields[3])
+            segments.append({"start": start, "end": start + float(fields[4]), "speaker": fields[7]})
+    return segments
 
 
 def _speech_intervals_from_vad_regions(

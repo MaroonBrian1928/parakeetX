@@ -9,6 +9,7 @@ services:
         TORCH_VERSION: 2.5.1
         TORCHAUDIO_VERSION: 2.5.1
         PYTORCH_CUDA_FLAVOR: cu118
+        SPEAKRS_ORT: sm52
     restart: always
     env_file:
       - .env

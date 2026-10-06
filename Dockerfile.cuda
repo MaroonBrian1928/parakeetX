@@ -1,8 +1,13 @@
 # syntax=docker/dockerfile:1.7
 
-# The cuda-legacy image (Maxwell/Pascal, e.g. TITAN X) overrides CUDA_IMAGE and the
-# TORCH_* args with a CUDA 12.4 base and cu118 wheels; see compose.yaml.
+# The cuda-legacy image (Maxwell/Pascal, e.g. TITAN X) overrides CUDA_IMAGE, the TORCH_*
+# args and SPEAKRS_ORT with a CUDA 12.4 base, cu118 wheels and the sm_52 ONNX Runtime build;
+# see compose.yaml.
 ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+# Built from Dockerfile.speakrs.
+ARG SPEAKRS_IMAGE=ghcr.io/maroonbrian1928/parakeetx-speakrs:ort1.20.1-sm52
+
+FROM ${SPEAKRS_IMAGE} AS speakrs
 
 FROM ${CUDA_IMAGE} AS builder
 
@@ -57,6 +62,14 @@ RUN apt-get update \
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /root/.local/share/uv/python /root/.local/share/uv/python
+
+# speakrs diarization backend (DIARIZATION__BACKEND=speakrs): official ONNX Runtime by
+# default, the sm_52 source build for Maxwell.
+ARG SPEAKRS_ORT=cuda12
+COPY --from=speakrs /opt/speakrs/bin /opt/speakrs/bin
+COPY --from=speakrs /opt/speakrs/models /opt/speakrs/models
+COPY --from=speakrs /opt/speakrs/ort-${SPEAKRS_ORT} /opt/speakrs/ort
+
 COPY src ./src
 
 EXPOSE 7474
