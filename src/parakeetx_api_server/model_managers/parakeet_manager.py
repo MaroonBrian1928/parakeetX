@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,7 @@ class ParakeetModelManager:
             if self._model is not None:
                 return self.status()
 
+            load_started = time.perf_counter()
             install_noisy_dependency_log_filters()
             try:
                 with suppress_noisy_dependency_streams():
@@ -114,6 +116,7 @@ class ParakeetModelManager:
 
             self._configure_cuda_runtime(self._model)
             self._configure_decoding(self._model)
+            print(f"Model load: parakeet elapsed={time.perf_counter() - load_started:.2f}s", file=sys.stderr, flush=True)
 
         self._idle_evictor.note_loaded()
         return self.status()

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -91,10 +93,12 @@ class ForcedAlignmentModelManager:
             if attn_implementation:
                 kwargs["attn_implementation"] = attn_implementation
 
+            load_started = time.perf_counter()
             self._model = Qwen3ForcedAligner.from_pretrained(
                 self._settings.model_name,
                 **kwargs,
             )
+            print(f"Model load: forced_alignment elapsed={time.perf_counter() - load_started:.2f}s", file=sys.stderr, flush=True)
             return self.status()
 
     def _resolve_dtype(self) -> str:

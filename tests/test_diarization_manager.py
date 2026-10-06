@@ -46,6 +46,8 @@ def test_diarization_uses_waveform_input(monkeypatch, tmp_path: Path) -> None:
     result = manager.diarize(audio_path, min_speakers=1)
 
     assert isinstance(calls[0], dict)
+    hook = calls[1].pop("hook")
+    assert callable(hook)
     assert calls[1] == {"min_speakers": 1}
     assert result == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
 
@@ -245,6 +247,8 @@ def test_diarize_regions_compacts_speech_once_and_remaps(monkeypatch, tmp_path: 
     assert segments == [{"start": 3.25, "end": 3.75, "speaker": "SPEAKER_00"}]
     assert calls[0]["sample_rate"] == 16000
     assert calls[0]["waveform"].value.shape == (16000,)
+    hook = calls[1].pop("hook")
+    assert callable(hook)
     assert calls[1] == {"min_speakers": 1}
 
 

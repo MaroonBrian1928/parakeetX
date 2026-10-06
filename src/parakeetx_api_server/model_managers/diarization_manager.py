@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +67,7 @@ class DiarizationModelManager:
             if self._pipeline is not None:
                 return self.status()
 
+            load_started = time.perf_counter()
             try:
                 from pyannote.audio import Pipeline
             except ImportError as exc:
@@ -108,6 +111,7 @@ class DiarizationModelManager:
                         MIN_FP16_CAPABILITY,
                     )
             self._pipeline = pipeline
+            print(f"Model load: diarization elapsed={time.perf_counter() - load_started:.2f}s", file=sys.stderr, flush=True)
 
         self._idle_evictor.note_loaded()
         return self.status()
@@ -333,7 +337,10 @@ class DiarizationModelManager:
             "waveform": torch.from_numpy(mono).unsqueeze(0),
             "sample_rate": int(sample_rate),
         }
-        return pipeline(audio_input, **kwargs)
+        timer = _PipelineStageTimer()
+        result = pipeline(audio_input, hook=timer, **kwargs)
+        timer.log()
+        return result
 
     def _apply_half_precision(self, pipeline: Any) -> None:
         """Convert pyannote's embedding model to FP16 in place and wrap its forward
@@ -368,6 +375,34 @@ class DiarizationModelManager:
             except Exception as exc:
                 logger.warning("FP16 conversion failed for pyannote %s: %s", ".".join(path), exc)
         logger.info("Pyannote FP16 conversion: %d submodules", converted)
+
+
+class _PipelineStageTimer:
+    """pyannote progress hook that logs how long each pipeline step took.
+
+    pyannote calls the hook as each step finishes (and during segmentation and
+    embedding progress), so a step's duration runs from the previous step's
+    last call to its own last call. Clustering happens between "embeddings"
+    and "discrete_diarization"; "finalize" covers exclusive-diarization
+    reconstruction and conversion after the last hook call.
+    """
+
+    def __init__(self) -> None:
+        self._started = time.perf_counter()
+        self._last_call: dict[str, float] = {}
+
+    def __call__(self, step_name: str, step_artifact: Any, **kwargs: Any) -> None:
+        self._last_call[step_name] = time.perf_counter()
+
+    def log(self) -> None:
+        parts = []
+        previous = self._started
+        for step_name, finished in self._last_call.items():
+            label = "clustering" if step_name == "discrete_diarization" else step_name
+            parts.append(f"{label}={finished - previous:.2f}s")
+            previous = finished
+        parts.append(f"finalize={time.perf_counter() - previous:.2f}s")
+        print(f"Diarization timing: {' '.join(parts)}", file=sys.stderr, flush=True)
 
 
 def _wrap_forward_with_dtype_cast(model: Any) -> None:

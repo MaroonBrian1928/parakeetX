@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import resource
 import sys
 import tempfile
 import time
@@ -58,6 +59,41 @@ class TranscriptionService:
         self._empty_cuda_cache_after_stage = empty_cuda_cache_after_stage
         self._inflight_lock = asyncio.Lock()
         self._inflight: dict[_TranscriptionRequestKey, asyncio.Task[dict[str, Any]]] = {}
+
+    def _memory_note(self) -> str:
+        """Memory snapshot for stage timing lines; VRAM peak is reset so each note covers one stage.
+
+        Diagnostics only: any failure yields a partial note rather than failing the request.
+        """
+        rss_peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2
+        parts = [f"rss_peak_gib={rss_peak_gib:.2f}"]
+        try:
+            resident = [
+                name
+                for name, manager in (
+                    ("asr", self._parakeet_manager),
+                    ("fa", self._forced_alignment_manager),
+                    ("diar", self._diarization_manager),
+                )
+                if manager.status()["loaded"]
+            ]
+            parts.insert(0, f"resident={','.join(resident) or 'none'}")
+        except Exception:
+            pass
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                free_bytes, _ = torch.cuda.mem_get_info()
+                parts += [
+                    f"vram_alloc_gib={torch.cuda.memory_allocated() / 1024**3:.2f}",
+                    f"vram_peak_gib={torch.cuda.max_memory_allocated() / 1024**3:.2f}",
+                    f"vram_free_gib={free_bytes / 1024**3:.2f}",
+                ]
+                torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
+        return " ".join(parts)
 
     @property
     def configured_model_name(self) -> str:
@@ -244,7 +280,8 @@ class TranscriptionService:
                 request_started=request_started,
                 extra=(
                     f"words={len(asr_payload.get('words', []))} "
-                    f"segments={len(asr_payload.get('segments', []))}"
+                    f"segments={len(asr_payload.get('segments', []))} "
+                    f"{self._memory_note()}"
                 ),
             )
             if self._empty_cuda_cache_after_stage:
@@ -273,7 +310,10 @@ class TranscriptionService:
                     "forced_alignment",
                     stage_started,
                     request_started=request_started,
-                    extra=("method=qwen " f"words={len(asr_payload.get('words', []))}"),
+                    extra=(
+                        f"method=qwen words={len(asr_payload.get('words', []))} "
+                        f"{self._memory_note()}"
+                    ),
                 )
                 if self._empty_cuda_cache_after_stage:
                     release_memory_to_os(clear_cuda=True)
@@ -320,7 +360,8 @@ class TranscriptionService:
                     request_started=request_started,
                     extra=(
                         f"segments={len(diarization_segments)} "
-                        f"vad_compacted={str(vad_options.enabled).lower()}"
+                        f"vad_compacted={str(vad_options.enabled).lower()} "
+                        f"{self._memory_note()}"
                     ),
                 )
                 if self._empty_cuda_cache_after_stage:
