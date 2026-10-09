@@ -141,6 +141,7 @@ Set `MODEL_PROCESS_ISOLATION=true` to run ASR/diarization model work in a child 
 `PARAKEET__USE_EXTRACTED_NEMO_CACHE=false` by default because Parakeet's restore peak is dominated by checkpoint loading, and pre-extraction can increase first-load RSS.
 `PARAKEET__TORCH_LOAD_MMAP=false` by default; PyTorch mmap loading is available as an experiment, but it did not reduce the measured Parakeet restore peak on the CUDA legacy image.
 Set `UNLOAD_ASR_BEFORE_DIARIZATION=true` only if you want lower ASR/diarization overlap at the cost of forcing Parakeet to reload for the next request.
+On 8 GB GPUs, set `UNLOAD_ASR_BEFORE_DIARIZATION=true` and `EMPTY_CUDA_CACHE_AFTER_STAGE=true` so ASR is unloaded before diarization and freed memory goes back to the driver between stages.
 When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
 Adaptive chunking uses a conservative memory-based ladder, caps chunks at 600 seconds by default, and logs the chosen chunk plan at transcription start.
 VAD is off by default; set `VAD__ENABLED=true` or pass `vad_filter=true` per request to run Silero VAD before ASR. VAD cuts the normalized audio into speech-only chunks, transcribes those chunks, then offsets word and segment timestamps back to the original timeline. Silero loads through ONNX Runtime by default (`VAD__USE_ONNX=true`) and can fall back to JIT if ONNX Runtime is unavailable or incompatible. `chunk_size`, `vad_onset`, and `vad_offset` follow the same shape as WhisperX's VAD controls.
@@ -222,7 +223,7 @@ Published image tags:
 
 Each CUDA image installs the torch build locked for its extra in `pyproject.toml` (`cuda` → cu128, `cuda-legacy` → cu126), selected with the `TORCH_EXTRA` build arg.
 
-Both CUDA images copy the speakrs diarization backend from `ghcr.io/maroonbrian1928/parakeetx-speakrs`, built from `Dockerfile.speakrs`. `cuda` gets unmodified upstream speakrs on the official ONNX Runtime GPU build. `cuda-legacy` gets speakrs patched for ONNX Runtime 1.20 (`speakrs/speakrs-maxwell.patch`) on an ONNX Runtime built from source for Maxwell (sm_52). That ONNX Runtime build takes ~45 minutes, so the image is built locally and pushed with `mise run speakrs-image` rather than in CI. To repackage without recompiling ONNX Runtime, reuse a published image as the `ort-sm52` stage: `--build-context ort-sm52=docker-image://ghcr.io/maroonbrian1928/parakeetx-speakrs:v2`.
+Both CUDA images copy the speakrs diarization backend from `ghcr.io/maroonbrian1928/parakeetx-speakrs`, built from `Dockerfile.speakrs`. `cuda` gets unmodified upstream speakrs on the official ONNX Runtime GPU build. `cuda-legacy` gets speakrs patched for ONNX Runtime 1.20 (`speakrs/speakrs-maxwell.patch`) on an ONNX Runtime built from source for Maxwell (sm_52). That ONNX Runtime build takes ~45 minutes, so the image is built locally and pushed with `mise run speakrs-image` rather than in CI. To repackage without recompiling ONNX Runtime, reuse a published image as the `ort-sm52` stage: `--build-context ort-sm52=docker-image://ghcr.io/maroonbrian1928/parakeetx-speakrs:v3`.
 
 Build CPU image:
 

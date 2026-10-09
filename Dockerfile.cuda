@@ -5,7 +5,7 @@
 # see compose.yaml.
 ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 # Built from Dockerfile.speakrs.
-ARG SPEAKRS_IMAGE=ghcr.io/maroonbrian1928/parakeetx-speakrs:v2@sha256:f5b4831bab8e375f6414a6d6967fb5d64cdfc31d528a5dc20b3517a429ac63ab
+ARG SPEAKRS_IMAGE=ghcr.io/maroonbrian1928/parakeetx-speakrs:v3@sha256:eb7dd52d7d22e171629a6309a9fd8041fe11925d9c06a3515a72a0753c15a650
 
 FROM ${SPEAKRS_IMAGE} AS speakrs
 

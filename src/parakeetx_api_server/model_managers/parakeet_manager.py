@@ -114,6 +114,9 @@ class ParakeetModelManager:
                     map_location=self._settings.device,
                     save_restore_connector=save_restore_connector,
                 )
+            # NeMo leaves a second fp32 copy of the weights on the device until the next GC
+            # (~2.3 GiB for parakeet-tdt-0.6b). Loading on CPU avoids it but is 2-3x slower.
+            release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
 
             self._configure_cuda_runtime(self._model)
             self._configure_decoding(self._model)
