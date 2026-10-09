@@ -56,6 +56,9 @@ fn read_pcm16_mono_16k(path: &Path) -> Result<Vec<f32>> {
         let body = data.get(pos + 8..pos + 8 + size).ok_or("truncated WAV chunk")?;
         match id {
             b"fmt " => {
+                if body.len() < 16 {
+                    return Err("truncated WAV fmt chunk".into());
+                }
                 let format = u16::from_le_bytes(body[0..2].try_into()?);
                 let channels = u16::from_le_bytes(body[2..4].try_into()?);
                 let rate = u32::from_le_bytes(body[4..8].try_into()?);

@@ -27,9 +27,6 @@ class _TranscriptionRequestKey:
     audio_sha256: str
     language: str | None
     diarize: bool
-    min_speakers: int | None
-    max_speakers: int | None
-    num_speakers: int | None
     vad_options: VadOptions
     forced_alignment: bool
 
@@ -125,9 +122,6 @@ class TranscriptionService:
                         normalized_path=normalized_path,
                         language=key.language,
                         diarize=key.diarize,
-                        min_speakers=key.min_speakers,
-                        max_speakers=key.max_speakers,
-                        num_speakers=key.num_speakers,
                         vad_options=key.vad_options,
                         forced_alignment=key.forced_alignment,
                         request_started=request_started,
@@ -162,9 +156,6 @@ class TranscriptionService:
         upload: UploadFile,
         language: str | None,
         diarize: bool,
-        min_speakers: int | None,
-        max_speakers: int | None,
-        num_speakers: int | None,
         vad_options: VadOptions,
         forced_alignment: bool,
     ) -> dict[str, Any]:
@@ -198,9 +189,6 @@ class TranscriptionService:
                     audio_sha256=audio_sha256,
                     language=language,
                     diarize=diarize,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_speakers=num_speakers,
                     vad_options=vad_options,
                     forced_alignment=forced_alignment,
                 )
@@ -221,9 +209,6 @@ class TranscriptionService:
         normalized_path: Path,
         language: str | None,
         diarize: bool,
-        min_speakers: int | None,
-        max_speakers: int | None,
-        num_speakers: int | None,
         vad_options: VadOptions,
         forced_alignment: bool,
         request_started: float,
@@ -342,17 +327,11 @@ class TranscriptionService:
                         self._diarization_manager.diarize_regions,
                         normalized_path,
                         vad_segments,
-                        min_speakers=min_speakers,
-                        max_speakers=max_speakers,
-                        num_speakers=num_speakers,
                     )
                 else:
                     diarization_segments = await asyncio.to_thread(
                         self._diarization_manager.diarize,
                         normalized_path,
-                        min_speakers=min_speakers,
-                        max_speakers=max_speakers,
-                        num_speakers=num_speakers,
                     )
                 _emit_stage_timing(
                     "diarization",

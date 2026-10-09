@@ -49,23 +49,15 @@ class _FakeDiarizationManager:
         self.call_count = 0
         self._lock = threading.Lock()
 
-    def diarize(self, path, *, min_speakers, max_speakers, num_speakers):
+    def diarize(self, path):
         _ = path
-        _ = min_speakers
-        _ = max_speakers
-        _ = num_speakers
         with self._lock:
             self.call_count += 1
         return [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
 
-    def diarize_regions(self, path, regions, *, min_speakers, max_speakers, num_speakers):
+    def diarize_regions(self, path, regions):
         _ = regions
-        return self.diarize(
-            path,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            num_speakers=num_speakers,
-        )
+        return self.diarize(path)
 
 
 class _FakeVadManager:
@@ -130,9 +122,6 @@ async def _transcribe(
         upload=_upload(data),
         language=None,
         diarize=diarize,
-        min_speakers=None,
-        max_speakers=None,
-        num_speakers=None,
         vad_options=_vad_options(),
         forced_alignment=False,
     )

@@ -12,17 +12,11 @@ class FakeTranscriptionService:
         upload,
         language,
         diarize,
-        min_speakers,
-        max_speakers,
-        num_speakers,
         vad_options,
         forced_alignment,
     ):
         _ = upload
         _ = language
-        _ = min_speakers
-        _ = max_speakers
-        _ = num_speakers
         self.vad_options = vad_options
         self.forced_alignment = forced_alignment
         diarization = (

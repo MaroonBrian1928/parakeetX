@@ -63,9 +63,6 @@ Supported multipart fields:
 - `timestamp_granularities[]`
 - `stream`
 - `diarize`
-- `min_speakers`
-- `max_speakers`
-- `num_speakers`
 - `speaker_embeddings`
 - `highlight_words`
 - `prompt`
@@ -146,10 +143,10 @@ Set `MODEL_PROCESS_ISOLATION=true` to run ASR/diarization model work in a child 
 Set `UNLOAD_ASR_BEFORE_DIARIZATION=true` only if you want lower ASR/diarization overlap at the cost of forcing Parakeet to reload for the next request.
 When `PARAKEET__DEVICE` is CUDA, the ASR model attempts `to(cuda)` + FP16 (`half()`), and transcription can auto-chunk audio based on currently available GPU memory.
 Adaptive chunking uses a conservative memory-based ladder, caps chunks at 600 seconds by default, and logs the chosen chunk plan at transcription start.
-Set `VAD__ENABLED=true` or pass `vad_filter=true` per request to run Silero VAD before ASR. VAD cuts the normalized audio into speech-only chunks, transcribes those chunks, then offsets word and segment timestamps back to the original timeline. Silero loads through ONNX Runtime by default (`VAD__USE_ONNX=true`) and can fall back to JIT if ONNX Runtime is unavailable or incompatible. `chunk_size`, `vad_onset`, and `vad_offset` follow the same shape as WhisperX's VAD controls.
+VAD is off by default; set `VAD__ENABLED=true` or pass `vad_filter=true` per request to run Silero VAD before ASR. VAD cuts the normalized audio into speech-only chunks, transcribes those chunks, then offsets word and segment timestamps back to the original timeline. Silero loads through ONNX Runtime by default (`VAD__USE_ONNX=true`) and can fall back to JIT if ONNX Runtime is unavailable or incompatible. `chunk_size`, `vad_onset`, and `vad_offset` follow the same shape as WhisperX's VAD controls.
 Pass `forced_alignment=true` or set `FORCED_ALIGNMENT__ENABLED=true` to enable the configured alignment method for every request. `FORCED_ALIGNMENT__METHOD=parakeet` uses native Parakeet word timestamps. Set `FORCED_ALIGNMENT__METHOD=qwen` to run `Qwen/Qwen3-ForcedAligner-0.6B` through `qwen-asr`; install it with `uv sync --extra forced-alignment`. For CUDA, use values such as `FORCED_ALIGNMENT__DEVICE=cuda:0` and `FORCED_ALIGNMENT__DTYPE=bfloat16`. Qwen alignment runs against coalesced ASR segment windows; lower `FORCED_ALIGNMENT__MAX_CHUNK_SECONDS` if alignment still runs out of GPU memory.
 If CUDA reports `device not ready`, lower `PARAKEET__CUDA_CHUNK_SECONDS_OVERRIDE` to a value such as `120` or reduce `PARAKEET__CUDA_CHUNK_MAX_SECONDS`.
-Set `PARAKEET__CUDA_FORCE_GREEDY_DECODING=true` to switch NeMo decoding from `greedy_batch` to `greedy` if a Maxwell/TITAN-era CUDA runtime hits decoder compatibility failures.
+GPUs below compute capability 7.5 (Maxwell, Pascal, Volta) run NeMo's batched decoder without CUDA graphs. Set `PARAKEET__CUDA_FORCE_GREEDY_DECODING=true` to switch NeMo decoding from `greedy_batch` to `greedy` if a GPU still hits decoder compatibility failures.
 The default CUDA Docker image uses a CUDA 12.8 runtime and PyTorch CUDA 12.8 wheels so RTX 50-series / Blackwell GPUs can run kernels for their newer compute capability.
 
 ## Environment Variables
@@ -171,7 +168,8 @@ Core env vars:
 - `PARAKEET__CUDA_CHUNK_OVERLAP_SECONDS`
 - `PARAKEET__USE_EXTRACTED_NEMO_CACHE`
 - `PARAKEET__TORCH_LOAD_MMAP`
-- `DIARIZATION__BACKEND`: `speakrs` (default; pyannote community-1's models on ONNX Runtime, ~2x faster, no `HF_TOKEN`, ships only in the CUDA images) or `pyannote`. The CPU image always uses `pyannote`; set it explicitly when running outside Docker.
+- `DIARIZATION__BACKEND`: `speakrs` (default; pyannote community-1's models on ONNX Runtime, ~2x faster on Maxwell and ~15% on Pascal, no `HF_TOKEN`, ships only in the CUDA images) or `pyannote`. The CPU image always uses `pyannote`; set it explicitly when running outside Docker. Speaker-count hints (`min_speakers` / `max_speakers` / `num_speakers`) are not supported; diarization always estimates the speaker count.
+- `DIARIZATION__SPEAKRS_TIMEOUT_SECONDS`: upper bound on one speakrs run (default 1800); a timeout fails the request.
 - `DIARIZATION__MODEL_NAME`
 - `DIARIZATION__DEVICE`
 - `DIARIZATION__PRELOAD_MODEL`
@@ -220,7 +218,9 @@ Published image tags:
 
 - `ghcr.io/maroonbrian1928/parakeetx:cpu`: CPU-only runtime.
 - `ghcr.io/maroonbrian1928/parakeetx:cuda`: CUDA 12.8 / PyTorch cu128 runtime for RTX 50-series / Blackwell and newer supported CUDA GPUs.
-- `ghcr.io/maroonbrian1928/parakeetx:cuda-legacy`: CUDA 12.4 / PyTorch cu118 runtime for older GPUs such as TITAN X / Maxwell that are not covered by newer PyTorch cu128 wheels.
+- `ghcr.io/maroonbrian1928/parakeetx:cuda-legacy`: CUDA 12.4 / PyTorch cu126 runtime for Maxwell and Pascal GPUs such as TITAN X, which PyTorch's cu128 wheels no longer cover.
+
+Each CUDA image installs the torch build locked for its extra in `pyproject.toml` (`cuda` → cu128, `cuda-legacy` → cu126), selected with the `TORCH_EXTRA` build arg.
 
 Both CUDA images copy the speakrs diarization backend from `ghcr.io/maroonbrian1928/parakeetx-speakrs`, built from `Dockerfile.speakrs`. `cuda` gets unmodified upstream speakrs on the official ONNX Runtime GPU build. `cuda-legacy` gets speakrs patched for ONNX Runtime 1.20 (`speakrs/speakrs-maxwell.patch`) on an ONNX Runtime built from source for Maxwell (sm_52). That ONNX Runtime build takes ~45 minutes, so the image is built locally and pushed with `mise run speakrs-image` rather than in CI. To repackage without recompiling ONNX Runtime, reuse a published image as the `ort-sm52` stage: `--build-context ort-sm52=docker-image://ghcr.io/maroonbrian1928/parakeetx-speakrs:v2`.
 

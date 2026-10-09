@@ -6,11 +6,9 @@ services:
       dockerfile: Dockerfile.cuda
       args:
         CUDA_IMAGE: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
-        TORCH_VERSION: 2.5.1
-        TORCHAUDIO_VERSION: 2.5.1
-        PYTORCH_CUDA_FLAVOR: cu118
+        TORCH_EXTRA: cuda-legacy
         SPEAKRS_VARIANT: sm52
-    restart: always
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -21,14 +19,14 @@ services:
       - "${HOST_PORT:-7474}:${UVICORN_PORT:-7474}"
     volumes:
       - hf-cache:/root/.cache/huggingface
+      # The sm_52 speakrs/ONNX Runtime build is JIT-compiled on Pascal and newer, once per speakrs
+      # process unless the CUDA JIT cache persists.
+      - cuda-cache:/root/.nv/ComputeCache
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: ["gpu"]
-    labels:
-      # autoheal (~/git/autoheal) restarts this container when unhealthy.
-      - autoheal=true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${UVICORN_PORT:-7474}/health')"]
       interval: 30s
@@ -38,3 +36,4 @@ services:
 
 volumes:
   hf-cache:
+  cuda-cache:

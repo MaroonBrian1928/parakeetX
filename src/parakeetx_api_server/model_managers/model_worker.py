@@ -82,18 +82,11 @@ class ModelWorkerClient:
     def diarize(
         self,
         audio_path: Path,
-        *,
-        min_speakers: int | None,
-        max_speakers: int | None,
-        num_speakers: int | None,
     ) -> list[dict[str, Any]]:
         return self._request(
             "diarize",
             {
                 "audio_path": str(audio_path),
-                "min_speakers": min_speakers,
-                "max_speakers": max_speakers,
-                "num_speakers": num_speakers,
             },
         )
 
@@ -101,19 +94,12 @@ class ModelWorkerClient:
         self,
         audio_path: Path,
         regions: list[dict[str, Any]],
-        *,
-        min_speakers: int | None,
-        max_speakers: int | None,
-        num_speakers: int | None,
     ) -> list[dict[str, Any]]:
         return self._request(
             "diarize_regions",
             {
                 "audio_path": str(audio_path),
                 "regions": regions,
-                "min_speakers": min_speakers,
-                "max_speakers": max_speakers,
-                "num_speakers": num_speakers,
             },
         )
 
@@ -259,17 +245,11 @@ def _model_worker_main(
                 elif command == "diarize":
                     result = diarization_manager.diarize(
                         Path(payload["audio_path"]),
-                        min_speakers=payload.get("min_speakers"),
-                        max_speakers=payload.get("max_speakers"),
-                        num_speakers=payload.get("num_speakers"),
                     )
                 elif command == "diarize_regions":
                     result = diarization_manager.diarize_regions(
                         Path(payload["audio_path"]),
                         payload.get("regions", []),
-                        min_speakers=payload.get("min_speakers"),
-                        max_speakers=payload.get("max_speakers"),
-                        num_speakers=payload.get("num_speakers"),
                     )
                 elif command == "all_status":
                     result = {

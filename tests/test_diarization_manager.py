@@ -44,12 +44,11 @@ def test_diarization_uses_waveform_input(monkeypatch, tmp_path: Path) -> None:
     manager = DiarizationModelManager(DiarizationSettings(backend="pyannote"), hf_token="token")
     manager._pipeline = FakePipeline()
 
-    result = manager.diarize(audio_path, min_speakers=1)
+    result = manager.diarize(audio_path)
 
     assert isinstance(calls[0], dict)
-    hook = calls[1].pop("hook")
-    assert callable(hook)
-    assert calls[1] == {"min_speakers": 1}
+    assert callable(calls[1].pop("hook"))
+    assert calls[1] == {}
     assert result == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
 
 
@@ -132,19 +131,13 @@ def test_process_isolated_diarization_manager_delegates_to_worker(tmp_path: Path
                 "requires_hf_token": True,
             }
 
-        def diarize(self, path, *, min_speakers, max_speakers, num_speakers):
+        def diarize(self, path):
             assert path == audio_path
-            assert min_speakers == 1
-            assert max_speakers is None
-            assert num_speakers is None
             return [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
 
-        def diarize_regions(self, path, regions, *, min_speakers, max_speakers, num_speakers):
+        def diarize_regions(self, path, regions):
             assert path == audio_path
             assert regions == [{"start": 0.0, "end": 1.0}]
-            assert min_speakers == 1
-            assert max_speakers is None
-            assert num_speakers is None
             return [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
 
         def unload_diarization(self):
@@ -159,14 +152,10 @@ def test_process_isolated_diarization_manager_delegates_to_worker(tmp_path: Path
         worker_client=worker,
     )
 
-    assert manager.diarize(audio_path, min_speakers=1) == [
+    assert manager.diarize(audio_path) == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
+    assert manager.diarize_regions(audio_path, [{"start": 0.0, "end": 1.0}]) == [
         {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}
     ]
-    assert manager.diarize_regions(
-        audio_path,
-        [{"start": 0.0, "end": 1.0}],
-        min_speakers=1,
-    ) == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
     assert manager.status()["idle_evict_minutes"] == 1
     assert manager.status()["loaded"] is True
     manager.unload_model()
@@ -240,18 +229,13 @@ def test_diarize_regions_compacts_speech_once_and_remaps(monkeypatch, tmp_path: 
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     manager._pipeline = FakePipeline()
 
-    segments = manager.diarize_regions(
-        audio_path,
-        [{"start": 3.0, "end": 4.0}],
-        min_speakers=1,
-    )
+    segments = manager.diarize_regions(audio_path, [{"start": 3.0, "end": 4.0}])
 
     assert segments == [{"start": 3.25, "end": 3.75, "speaker": "SPEAKER_00"}]
     assert calls[0]["sample_rate"] == 16000
     assert calls[0]["waveform"].value.shape == (16000,)
-    hook = calls[1].pop("hook")
-    assert callable(hook)
-    assert calls[1] == {"min_speakers": 1}
+    assert callable(calls[1].pop("hook"))
+    assert calls[1] == {}
 
 
 def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
@@ -265,10 +249,7 @@ def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
     manager = DiarizationModelManager(DiarizationSettings(backend="pyannote"), hf_token="token")
     calls: list[Path] = []
 
-    def fake_diarize(path, *, min_speakers, max_speakers, num_speakers):
-        assert min_speakers is None
-        assert max_speakers is None
-        assert num_speakers is None
+    def fake_diarize(path):
         calls.append(path)
         return [{"start": 0.25, "end": 0.75, "speaker": "SPEAKER_00"}]
 
@@ -323,4 +304,17 @@ def test_speakrs_backend_failure_raises_runtime_error(tmp_path: Path) -> None:
     )
 
     with pytest.raises(RuntimeError, match="no kernel image"):
+        manager.diarize(tmp_path / "audio.wav")
+
+
+def test_speakrs_backend_timeout_raises_runtime_error(tmp_path: Path) -> None:
+    home = _fake_speakrs_home(tmp_path, "sleep 5\n")
+    manager = DiarizationModelManager(
+        DiarizationSettings(
+            backend="speakrs", device="cuda", speakrs_home=str(home), speakrs_timeout_seconds=0.2
+        ),
+        hf_token=None,
+    )
+
+    with pytest.raises(RuntimeError, match="timed out"):
         manager.diarize(tmp_path / "audio.wav")

@@ -144,76 +144,39 @@ class DiarizationModelManager:
     def diarize(
         self,
         audio_path: Path,
-        *,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        num_speakers: int | None = None,
     ) -> list[dict[str, Any]]:
         if self._worker_client is not None:
             with self._idle_evictor.use():
-                result = self._worker_client.diarize(
-                    audio_path,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_speakers=num_speakers,
-                )
+                result = self._worker_client.diarize(audio_path)
                 self._worker_loaded = True
                 return result
 
         if self._settings.backend == "speakrs":
-            return self._run_speakrs(
-                audio_path,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-                num_speakers=num_speakers,
-            )
+            return self._run_speakrs(audio_path)
 
         waveform, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
         return self._diarize_waveform(
             waveform,
             int(sample_rate),
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            num_speakers=num_speakers,
         )
 
     def diarize_regions(
         self,
         audio_path: Path,
         regions: list[dict[str, Any]],
-        *,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        num_speakers: int | None = None,
     ) -> list[dict[str, Any]]:
         if self._worker_client is not None:
             with self._idle_evictor.use():
-                result = self._worker_client.diarize_regions(
-                    audio_path,
-                    regions,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_speakers=num_speakers,
-                )
+                result = self._worker_client.diarize_regions(audio_path, regions)
                 self._worker_loaded = True
                 return result
 
-        return self._diarize_regions_local(
-            audio_path,
-            regions,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            num_speakers=num_speakers,
-        )
+        return self._diarize_regions_local(audio_path, regions)
 
     def _diarize_regions_local(
         self,
         audio_path: Path,
         regions: list[dict[str, Any]],
-        *,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        num_speakers: int | None = None,
     ) -> list[dict[str, Any]]:
         speech_intervals = _speech_intervals_from_vad_regions(regions)
         if not speech_intervals:
@@ -227,12 +190,7 @@ class DiarizationModelManager:
             total_frames=total_frames,
             sample_rate=sample_rate,
         ):
-            return self.diarize(
-                audio_path,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-                num_speakers=num_speakers,
-            )
+            return self.diarize(audio_path)
 
         compact_chunks: list[np.ndarray] = []
         mapping: list[dict[str, float]] = []
@@ -272,9 +230,6 @@ class DiarizationModelManager:
         compact_segments = self._diarize_waveform(
             np.concatenate(compact_chunks, axis=0),
             sample_rate,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            num_speakers=num_speakers,
         )
         return _map_compact_diarization_to_original(compact_segments, mapping)
 
@@ -282,31 +237,12 @@ class DiarizationModelManager:
         self,
         waveform: np.ndarray,
         sample_rate: int,
-        *,
-        min_speakers: int | None,
-        max_speakers: int | None,
-        num_speakers: int | None,
     ) -> list[dict[str, Any]]:
         if self._settings.backend == "speakrs":
             with tempfile.TemporaryDirectory(prefix="parakeetx-speakrs-") as tmpdir:
                 wav_path = Path(tmpdir) / "audio.wav"
                 sf.write(str(wav_path), waveform, sample_rate, format="WAV", subtype="PCM_16")
-                return self._run_speakrs(
-                    wav_path,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_speakers=num_speakers,
-                )
-
-        kwargs = {
-            name: value
-            for name, value in (
-                ("min_speakers", min_speakers),
-                ("max_speakers", max_speakers),
-                ("num_speakers", num_speakers),
-            )
-            if value is not None
-        }
+                return self._run_speakrs(wav_path)
 
         with self._idle_evictor.use():
             pipeline = self._pipeline
@@ -316,7 +252,7 @@ class DiarizationModelManager:
             if pipeline is None:
                 raise RuntimeError("Diarization model failed to load")
 
-            annotation = self._run_pipeline(pipeline, waveform, sample_rate, kwargs)
+            annotation = self._run_pipeline(pipeline, waveform, sample_rate)
             # pyannote 4 wraps the Annotation in a DiarizeOutput.
             if not hasattr(annotation, "itertracks"):
                 annotation = getattr(annotation, "speaker_diarization", annotation)
@@ -336,14 +272,7 @@ class DiarizationModelManager:
     def _run_speakrs(
         self,
         audio_path: Path,
-        *,
-        min_speakers: int | None,
-        max_speakers: int | None,
-        num_speakers: int | None,
     ) -> list[dict[str, Any]]:
-        if any(value is not None for value in (min_speakers, max_speakers, num_speakers)):
-            logger.warning("speakrs diarization ignores min_speakers/max_speakers/num_speakers.")
-
         home = Path(self._settings.speakrs_home)
         ort_lib = home / "ort" / "lib"
         mode = "cuda" if self._settings.device.startswith("cuda") else "cpu"
@@ -358,9 +287,19 @@ class DiarizationModelManager:
 
         started = time.perf_counter()
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, env=env)
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=self._settings.speakrs_timeout_seconds,
+            )
         except FileNotFoundError as exc:
             raise RuntimeError(f"speakrs-diarize not found at {command[0]}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"speakrs diarization timed out after {self._settings.speakrs_timeout_seconds:.0f}s"
+            ) from exc
         if completed.returncode != 0:
             raise RuntimeError(f"speakrs diarization failed: {completed.stderr.strip()[-2000:]}")
         print(
@@ -395,7 +334,6 @@ class DiarizationModelManager:
         pipeline: Any,
         waveform: np.ndarray,
         sample_rate: int,
-        kwargs: dict[str, Any],
     ) -> Any:
         import torch
 
@@ -407,7 +345,7 @@ class DiarizationModelManager:
             "sample_rate": int(sample_rate),
         }
         timer = _PipelineStageTimer()
-        result = pipeline(audio_input, hook=timer, **kwargs)
+        result = pipeline(audio_input, hook=timer)
         timer.log()
         return result
 

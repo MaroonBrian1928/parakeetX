@@ -16,6 +16,7 @@ from ..config import ParakeetSettings
 from ..log_filters import install_noisy_dependency_log_filters, suppress_noisy_dependency_streams
 from ..memory import release_memory_to_os
 from .device_capability import (
+    MIN_CUDA_GRAPH_DECODER_CAPABILITY,
     MIN_FP16_CAPABILITY,
     MIN_TORCH_COMPILE_CAPABILITY,
     cuda_compute_capability,
@@ -168,25 +169,29 @@ class ParakeetModelManager:
     def _configure_decoding(self, model: Any) -> None:
         if not self._settings.device.startswith("cuda"):
             return
-        if not self._settings.cuda_force_greedy_decoding:
-            return
 
         decoding_cfg = getattr(getattr(model, "cfg", None), "decoding", None)
         strategy = getattr(decoding_cfg, "strategy", None)
         if strategy != "greedy_batch":
             return
 
-        # Maxwell-era GPUs can fail in NeMo's batched CUDA-graph decoder path (invalid PTX/invalid argument).
-        # Use non-batched greedy decoding on CUDA to keep GPU execution while avoiding that path.
+        force_greedy = self._settings.cuda_force_greedy_decoding
+        if not force_greedy and meets_capability(self._settings.device, MIN_CUDA_GRAPH_DECODER_CAPABILITY):
+            return
+
         try:
             from omegaconf import open_dict
 
             with open_dict(model.cfg.decoding):
-                model.cfg.decoding.strategy = "greedy"
+                if force_greedy:
+                    model.cfg.decoding.strategy = "greedy"
+                else:
+                    model.cfg.decoding.greedy.use_cuda_graph_decoder = False
 
             model.change_decoding_strategy(model.cfg.decoding, verbose=False)
             logger.warning(
-                "Adjusted RNNT decoding strategy from 'greedy_batch' to 'greedy' for CUDA compatibility."
+                "Adjusted RNNT decoding for CUDA compatibility: %s.",
+                "strategy greedy_batch -> greedy" if force_greedy else "CUDA-graph decoder disabled",
             )
         except Exception as exc:
             logger.warning("Unable to adjust RNNT decoding strategy for CUDA compatibility: %s", exc)

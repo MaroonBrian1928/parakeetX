@@ -61,6 +61,8 @@ class DiarizationSettings(BaseModel):
     cuda_half_precision: bool = False
     # Install root of the speakrs-diarize binary, its ONNX models and ONNX Runtime (see Dockerfile.speakrs).
     speakrs_home: str = "/opt/speakrs"
+    # A hung speakrs-diarize otherwise blocks the request forever while /health keeps answering.
+    speakrs_timeout_seconds: float = Field(default=1800.0, gt=0)
 
     @field_validator("*", mode="before")
     @classmethod
@@ -77,7 +79,7 @@ class DiarizationSettings(BaseModel):
 
 
 class VadSettings(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     method: str = "silero"
     preload_model: bool = False
     device: str = "auto"

@@ -4,7 +4,7 @@ uv = "latest"
 
 [tasks.sync]
 description = "Install all dependencies with uv"
-run = "uv sync --all-extras --dev"
+run = "uv sync --all-extras --no-extra cuda-legacy --dev"
 
 [tasks.test]
 description = "Run unit and route tests"
