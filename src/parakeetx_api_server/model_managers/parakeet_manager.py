@@ -114,12 +114,11 @@ class ParakeetModelManager:
                     map_location=self._settings.device,
                     save_restore_connector=save_restore_connector,
                 )
-            # NeMo leaves a second fp32 copy of the weights on the device until the next GC
-            # (~2.3 GiB for parakeet-tdt-0.6b). Loading on CPU avoids it but is 2-3x slower.
-            release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
-
             self._configure_cuda_runtime(self._model)
             self._configure_decoding(self._model)
+            # NeMo leaves a second copy of the weights on the device until the next GC (~2.3 GiB
+            # for parakeet-tdt-0.6b), and half() leaves the fp32 weights in the CUDA cache.
+            release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
             print(f"Model load: parakeet elapsed={time.perf_counter() - load_started:.2f}s", file=sys.stderr, flush=True)
 
         self._idle_evictor.note_loaded()
@@ -210,7 +209,7 @@ class ParakeetModelManager:
 
         with self._lock:
             self._model = None
-            self._idle_evictor.cancel()
+        self._idle_evictor.cancel()
         release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
         return self.status()
 

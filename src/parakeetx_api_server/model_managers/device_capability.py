@@ -6,8 +6,8 @@ MIN_FP16_CAPABILITY = (7, 0)
 MIN_TORCH_COMPILE_CAPABILITY = (7, 0)
 MIN_BF16_CAPABILITY = (8, 0)
 MIN_FLASH_ATTENTION_CAPABILITY = (8, 0)
-# NeMo's CUDA-graph RNNT/TDT decoder corrupts later torch.load calls in the same process on
-# Maxwell (seen with torch 2.10 on sm_52), which breaks model reloads and pyannote.
+# NeMo's CUDA-graph RNNT/TDT decoder corrupts every later torch.load in the process on Maxwell,
+# breaking model reloads and pyannote. Older GPUs run the batched decoder without CUDA graphs.
 MIN_CUDA_GRAPH_DECODER_CAPABILITY = (7, 5)
 
 

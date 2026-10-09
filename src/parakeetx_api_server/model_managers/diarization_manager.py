@@ -137,7 +137,7 @@ class DiarizationModelManager:
 
         with self._lock:
             self._pipeline = None
-            self._idle_evictor.cancel()
+        self._idle_evictor.cancel()
         release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
         return self.status()
 

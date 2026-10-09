@@ -87,9 +87,16 @@ class ForcedAlignmentModelManager:
         }
 
     def load_model(self) -> dict[str, Any]:
+        self._ensure_model()
+        self._idle_evictor.note_loaded()
+        return self.status()
+
+    def _ensure_model(self) -> Any:
+        """Load the aligner if needed and return it, captured under the lock so a concurrent
+        unload can't clear it between loading and use."""
         with self._lock:
             if self._model is not None:
-                return self.status()
+                return self._model
 
             try:
                 import torch
@@ -113,8 +120,7 @@ class ForcedAlignmentModelManager:
                 **kwargs,
             )
             print(f"Model load: forced_alignment elapsed={time.perf_counter() - load_started:.2f}s", file=sys.stderr, flush=True)
-        self._idle_evictor.note_loaded()
-        return self.status()
+            return self._model
 
     def _resolve_dtype(self) -> str:
         dtype = self._settings.dtype
@@ -149,7 +155,7 @@ class ForcedAlignmentModelManager:
     def unload_model(self) -> dict[str, Any]:
         with self._lock:
             self._model = None
-            self._idle_evictor.cancel()
+        self._idle_evictor.cancel()
         release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
         return self.status()
 
@@ -173,13 +179,8 @@ class ForcedAlignmentModelManager:
         aligned_words: list[dict[str, Any]] = []
 
         with self._idle_evictor.use():
-            # Hold a local reference: an idle eviction or the unload route can clear self._model mid-request.
-            model = self._model
-            if model is None:
-                self.load_model()
-                model = self._model
-            if model is None:
-                raise RuntimeError("Qwen3 forced aligner did not load")
+            # A local reference keeps the unload route from breaking an in-flight request.
+            model = self._ensure_model()
 
             language_name = _language_name(language)
             batch_size = max(1, int(self._settings.batch_size))
