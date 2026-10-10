@@ -37,6 +37,16 @@
       "matchManagers": ["dockerfile"],
       "groupName": "docker base images",
       "automerge": false
+    },
+    {
+      "description": "CUDA 13 drops Maxwell, Pascal and Volta, and the speakrs cuda12 ONNX Runtime links libcudart.so.12",
+      "matchDepNames": ["nvidia/cuda"],
+      "allowedVersions": "<13"
+    },
+    {
+      "description": "Images pin Python 3.12 (UV_PYTHON); the ML stack lags new Python releases, so bump it by hand",
+      "matchDepNames": ["python"],
+      "allowedVersions": "<3.13"
     }
   ]
 }
