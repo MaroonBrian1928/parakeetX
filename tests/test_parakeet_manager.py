@@ -405,13 +405,13 @@ def test_configure_decoding_can_force_greedy(monkeypatch: pytest.MonkeyPatch) ->
     assert calls == ["greedy"]
 
 
-def test_configure_decoding_disables_cuda_graphs_on_old_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_configure_decoding_uses_greedy_on_old_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
     from parakeetx_api_server.model_managers import device_capability
 
     monkeypatch.setattr(device_capability, "cuda_compute_capability", lambda _device: (5, 2))
     manager = ParakeetModelManager(ParakeetSettings(device="cuda"))
-    decoding = types.SimpleNamespace(strategy="greedy_batch", greedy=types.SimpleNamespace())
-    calls: list[object] = []
+    decoding = types.SimpleNamespace(strategy="greedy_batch")
+    calls: list[str] = []
 
     class FakeOpenDict:
         def __init__(self, value):
@@ -426,14 +426,12 @@ def test_configure_decoding_disables_cuda_graphs_on_old_gpus(monkeypatch: pytest
     monkeypatch.setitem(sys.modules, "omegaconf", types.SimpleNamespace(open_dict=FakeOpenDict))
     model = types.SimpleNamespace(
         cfg=types.SimpleNamespace(decoding=decoding),
-        change_decoding_strategy=lambda value, *, verbose: calls.append(value),
+        change_decoding_strategy=lambda value, *, verbose: calls.append(value.strategy),
     )
 
     manager._configure_decoding(model)
 
-    assert decoding.strategy == "greedy_batch"
-    assert decoding.greedy.use_cuda_graph_decoder is False
-    assert calls == [decoding]
+    assert calls == ["greedy"]
 
 
 def test_log_chunk_plan_emits_one_line(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:

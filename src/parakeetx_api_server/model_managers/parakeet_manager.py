@@ -177,23 +177,20 @@ class ParakeetModelManager:
         if strategy != "greedy_batch":
             return
 
-        force_greedy = self._settings.cuda_force_greedy_decoding
-        if not force_greedy and meets_capability(self._settings.device, MIN_CUDA_GRAPH_DECODER_CAPABILITY):
+        if not self._settings.cuda_force_greedy_decoding and meets_capability(
+            self._settings.device, MIN_CUDA_GRAPH_DECODER_CAPABILITY
+        ):
             return
 
         try:
             from omegaconf import open_dict
 
             with open_dict(model.cfg.decoding):
-                if force_greedy:
-                    model.cfg.decoding.strategy = "greedy"
-                else:
-                    model.cfg.decoding.greedy.use_cuda_graph_decoder = False
+                model.cfg.decoding.strategy = "greedy"
 
             model.change_decoding_strategy(model.cfg.decoding, verbose=False)
             logger.warning(
-                "Adjusted RNNT decoding for CUDA compatibility: %s.",
-                "strategy greedy_batch -> greedy" if force_greedy else "CUDA-graph decoder disabled",
+                "Adjusted RNNT decoding strategy from 'greedy_batch' to 'greedy' for CUDA compatibility."
             )
         except Exception as exc:
             logger.warning("Unable to adjust RNNT decoding strategy for CUDA compatibility: %s", exc)
