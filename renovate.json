@@ -1,0 +1,42 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "America/New_York",
+  "schedule": ["before 6am on monday"],
+  "semanticCommits": "enabled",
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 12,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "packageRules": [
+    {
+      "description": "Group all GitHub Actions bumps into one PR (manual review)",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Base runtime + dev deps are exercised by the minimal pytest CI -> automerge low-risk bumps",
+      "matchDepTypes": ["project.dependencies", "dev"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "ML/ASR stack (heavy extras) is NOT covered by CI -> group for manual review, never automerge",
+      "matchDepTypes": ["nemo", "diarization", "vad", "forced-alignment", "cuda"],
+      "groupName": "ml / asr stack",
+      "automerge": false
+    },
+    {
+      "description": "Docker base images (incl. nvidia/cuda) -> manual review, never automerge",
+      "matchManagers": ["dockerfile"],
+      "groupName": "docker base images",
+      "automerge": false
+    }
+  ]
+}
