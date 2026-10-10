@@ -28,7 +28,7 @@
     },
     {
       "description": "ML/ASR stack (heavy extras) is NOT covered by CI -> group for manual review, never automerge",
-      "matchDepTypes": ["nemo", "diarization", "vad", "forced-alignment", "cuda"],
+      "matchDepTypes": ["nemo", "diarization", "vad", "forced-alignment", "cuda", "cuda-legacy"],
       "groupName": "ml / asr stack",
       "automerge": false
     },
