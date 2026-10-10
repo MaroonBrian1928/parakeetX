@@ -5,6 +5,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from parakeetx_api_server.config import DiarizationSettings
@@ -40,13 +41,14 @@ def test_diarization_uses_waveform_input(monkeypatch, tmp_path: Path) -> None:
     fake_torch = type("FakeTorch", (), {"from_numpy": lambda self, value: FakeTensor()})()
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
-    manager = DiarizationModelManager(DiarizationSettings(), hf_token="token")
+    manager = DiarizationModelManager(DiarizationSettings(backend="pyannote"), hf_token="token")
     manager._pipeline = FakePipeline()
 
-    result = manager.diarize(audio_path, min_speakers=1)
+    result = manager.diarize(audio_path)
 
     assert isinstance(calls[0], dict)
-    assert calls[1] == {"min_speakers": 1}
+    assert callable(calls[1].pop("hook"))
+    assert calls[1] == {}
     assert result == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
 
 
@@ -87,6 +89,7 @@ def test_load_model_applies_configured_pyannote_batch_sizes(monkeypatch) -> None
 
     manager = DiarizationModelManager(
         DiarizationSettings(
+            backend="pyannote",
             device="cuda",
             segmentation_batch_size=128,
             embedding_batch_size=64,
@@ -128,19 +131,13 @@ def test_process_isolated_diarization_manager_delegates_to_worker(tmp_path: Path
                 "requires_hf_token": True,
             }
 
-        def diarize(self, path, *, min_speakers, max_speakers, num_speakers):
+        def diarize(self, path):
             assert path == audio_path
-            assert min_speakers == 1
-            assert max_speakers is None
-            assert num_speakers is None
             return [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
 
-        def diarize_regions(self, path, regions, *, min_speakers, max_speakers, num_speakers):
+        def diarize_regions(self, path, regions):
             assert path == audio_path
             assert regions == [{"start": 0.0, "end": 1.0}]
-            assert min_speakers == 1
-            assert max_speakers is None
-            assert num_speakers is None
             return [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
 
         def unload_diarization(self):
@@ -155,14 +152,10 @@ def test_process_isolated_diarization_manager_delegates_to_worker(tmp_path: Path
         worker_client=worker,
     )
 
-    assert manager.diarize(audio_path, min_speakers=1) == [
+    assert manager.diarize(audio_path) == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
+    assert manager.diarize_regions(audio_path, [{"start": 0.0, "end": 1.0}]) == [
         {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}
     ]
-    assert manager.diarize_regions(
-        audio_path,
-        [{"start": 0.0, "end": 1.0}],
-        min_speakers=1,
-    ) == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
     assert manager.status()["idle_evict_minutes"] == 1
     assert manager.status()["loaded"] is True
     manager.unload_model()
@@ -210,7 +203,7 @@ def test_diarize_regions_compacts_speech_once_and_remaps(monkeypatch, tmp_path: 
     sf.write(str(audio_path), samples, 16000)
     calls: list[object] = []
 
-    manager = DiarizationModelManager(DiarizationSettings(), hf_token="token")
+    manager = DiarizationModelManager(DiarizationSettings(backend="pyannote"), hf_token="token")
 
     class FakeAnnotation:
         def itertracks(self, yield_label: bool):
@@ -236,16 +229,13 @@ def test_diarize_regions_compacts_speech_once_and_remaps(monkeypatch, tmp_path: 
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     manager._pipeline = FakePipeline()
 
-    segments = manager.diarize_regions(
-        audio_path,
-        [{"start": 3.0, "end": 4.0}],
-        min_speakers=1,
-    )
+    segments = manager.diarize_regions(audio_path, [{"start": 3.0, "end": 4.0}])
 
     assert segments == [{"start": 3.25, "end": 3.75, "speaker": "SPEAKER_00"}]
     assert calls[0]["sample_rate"] == 16000
     assert calls[0]["waveform"].value.shape == (16000,)
-    assert calls[1] == {"min_speakers": 1}
+    assert callable(calls[1].pop("hook"))
+    assert calls[1] == {}
 
 
 def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
@@ -256,13 +246,10 @@ def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
     samples = np.zeros(10 * 16000, dtype=np.float32)
     sf.write(str(audio_path), samples, 16000)
 
-    manager = DiarizationModelManager(DiarizationSettings(), hf_token="token")
+    manager = DiarizationModelManager(DiarizationSettings(backend="pyannote"), hf_token="token")
     calls: list[Path] = []
 
-    def fake_diarize(path, *, min_speakers, max_speakers, num_speakers):
-        assert min_speakers is None
-        assert max_speakers is None
-        assert num_speakers is None
+    def fake_diarize(path):
         calls.append(path)
         return [{"start": 0.25, "end": 0.75, "speaker": "SPEAKER_00"}]
 
@@ -277,3 +264,57 @@ def test_diarize_regions_reuses_source_when_vad_covers_full_audio(
 
     assert segments == [{"start": 0.25, "end": 0.75, "speaker": "SPEAKER_00"}]
     assert calls == [audio_path]
+
+
+def _fake_speakrs_home(tmp_path: Path, script_body: str) -> Path:
+    home = tmp_path / "speakrs"
+    (home / "bin").mkdir(parents=True)
+    binary = home / "bin" / "speakrs-diarize"
+    binary.write_text("#!/bin/sh\n" + script_body)
+    binary.chmod(0o755)
+    return home
+
+
+def test_speakrs_backend_runs_binary_and_parses_rttm(tmp_path: Path) -> None:
+    home = _fake_speakrs_home(
+        tmp_path,
+        'test "$1" = cuda || exit 3\n'
+        f'test "$2" = "{tmp_path}/speakrs/models" || exit 4\n'
+        f'test "$ORT_DYLIB_PATH" = "{tmp_path}/speakrs/ort/lib/libonnxruntime.so" || exit 5\n'
+        'echo "SPEAKER audio 1 0.500 1.250 <NA> <NA> SPEAKER_00 <NA> <NA>"\n'
+        'echo "SPEAKER audio 1 2.000 0.500 <NA> <NA> SPEAKER_01 <NA> <NA>"\n',
+    )
+    manager = DiarizationModelManager(
+        DiarizationSettings(backend="speakrs", device="cuda", speakrs_home=str(home)),
+        hf_token=None,
+    )
+
+    assert manager.load_model()["requires_hf_token"] is False
+    assert manager.diarize(tmp_path / "audio.wav") == [
+        {"start": 0.5, "end": 1.75, "speaker": "SPEAKER_00"},
+        {"start": 2.0, "end": 2.5, "speaker": "SPEAKER_01"},
+    ]
+
+
+def test_speakrs_backend_failure_raises_runtime_error(tmp_path: Path) -> None:
+    home = _fake_speakrs_home(tmp_path, 'echo "no kernel image" >&2\nexit 1\n')
+    manager = DiarizationModelManager(
+        DiarizationSettings(backend="speakrs", device="cuda", speakrs_home=str(home)),
+        hf_token=None,
+    )
+
+    with pytest.raises(RuntimeError, match="no kernel image"):
+        manager.diarize(tmp_path / "audio.wav")
+
+
+def test_speakrs_backend_timeout_raises_runtime_error(tmp_path: Path) -> None:
+    home = _fake_speakrs_home(tmp_path, "sleep 5\n")
+    manager = DiarizationModelManager(
+        DiarizationSettings(
+            backend="speakrs", device="cuda", speakrs_home=str(home), speakrs_timeout_seconds=0.2
+        ),
+        hf_token=None,
+    )
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        manager.diarize(tmp_path / "audio.wav")

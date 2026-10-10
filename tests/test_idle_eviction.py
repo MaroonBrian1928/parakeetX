@@ -51,3 +51,31 @@ def test_idle_evictor_waits_for_active_use_before_unloading() -> None:
 
     assert evicted.wait(timeout=1.0)
     assert loaded is False
+
+
+def test_use_waits_for_an_eviction_already_in_progress() -> None:
+    loaded = True
+    unload_started = threading.Event()
+    unload_finished = threading.Event()
+    finished_before_use: list[bool] = []
+
+    def unload() -> None:
+        nonlocal loaded
+        unload_started.set()
+        time.sleep(0.1)
+        loaded = False
+        unload_finished.set()
+
+    evictor = IdleModelEvictor(
+        model_label="test",
+        idle_minutes=0.0001,
+        is_loaded=lambda: loaded,
+        unload=unload,
+    )
+
+    evictor.note_loaded()
+    assert unload_started.wait(timeout=1.0)
+    with evictor.use():
+        finished_before_use.append(unload_finished.is_set())
+
+    assert finished_before_use == [True]

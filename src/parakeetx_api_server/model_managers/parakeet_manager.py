@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from ..config import ParakeetSettings
 from ..log_filters import install_noisy_dependency_log_filters, suppress_noisy_dependency_streams
 from ..memory import release_memory_to_os
 from .device_capability import (
+    MIN_CUDA_GRAPH_DECODER_CAPABILITY,
     MIN_FP16_CAPABILITY,
     MIN_TORCH_COMPILE_CAPABILITY,
     cuda_compute_capability,
@@ -77,6 +79,7 @@ class ParakeetModelManager:
             if self._model is not None:
                 return self.status()
 
+            load_started = time.perf_counter()
             install_noisy_dependency_log_filters()
             try:
                 with suppress_noisy_dependency_streams():
@@ -111,9 +114,12 @@ class ParakeetModelManager:
                     map_location=self._settings.device,
                     save_restore_connector=save_restore_connector,
                 )
-
             self._configure_cuda_runtime(self._model)
             self._configure_decoding(self._model)
+            # NeMo leaves a second copy of the weights on the device until the next GC (~2.3 GiB
+            # for parakeet-tdt-0.6b), and half() leaves the fp32 weights in the CUDA cache.
+            release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
+            print(f"Model load: parakeet elapsed={time.perf_counter() - load_started:.2f}s", file=sys.stderr, flush=True)
 
         self._idle_evictor.note_loaded()
         return self.status()
@@ -165,16 +171,17 @@ class ParakeetModelManager:
     def _configure_decoding(self, model: Any) -> None:
         if not self._settings.device.startswith("cuda"):
             return
-        if not self._settings.cuda_force_greedy_decoding:
-            return
 
         decoding_cfg = getattr(getattr(model, "cfg", None), "decoding", None)
         strategy = getattr(decoding_cfg, "strategy", None)
         if strategy != "greedy_batch":
             return
 
-        # Maxwell-era GPUs can fail in NeMo's batched CUDA-graph decoder path (invalid PTX/invalid argument).
-        # Use non-batched greedy decoding on CUDA to keep GPU execution while avoiding that path.
+        if not self._settings.cuda_force_greedy_decoding and meets_capability(
+            self._settings.device, MIN_CUDA_GRAPH_DECODER_CAPABILITY
+        ):
+            return
+
         try:
             from omegaconf import open_dict
 
@@ -199,15 +206,8 @@ class ParakeetModelManager:
 
         with self._lock:
             self._model = None
-            self._idle_evictor.cancel()
-            if self._settings.device.startswith("cuda"):
-                try:
-                    import torch
-
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-        release_memory_to_os()
+        self._idle_evictor.cancel()
+        release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
         return self.status()
 
     def transcribe(
@@ -381,15 +381,6 @@ class ParakeetModelManager:
         finally:
             release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
 
-    def _transcribe_regions_local(
-        self,
-        audio_path: Path,
-        regions: list[dict[str, Any]],
-        *,
-        language: str | None = None,
-    ) -> dict[str, Any]:
-        return self.transcribe_regions(audio_path, regions, language=language)
-
     def _is_loaded(self) -> bool:
         if self._worker_client is not None:
             return self._worker_loaded
@@ -399,57 +390,31 @@ class ParakeetModelManager:
         return self._resolve_chunk_plan(audio_path)["chunk_seconds"]
 
     def _resolve_chunk_plan(self, audio_path: Path) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "duration_seconds": _audio_duration_seconds(audio_path),
+            "gpu_name": None,
+            "free_gib": None,
+            "total_gib": None,
+        }
+        duration_seconds = base["duration_seconds"]
+
         if not self._settings.device.startswith("cuda"):
-            return {
-                "chunk_seconds": None,
-                "reason": "non_cuda_device",
-                "duration_seconds": _audio_duration_seconds(audio_path),
-                "chunk_policy": "non_cuda",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
+            return {**base, "chunk_seconds": None, "reason": "non_cuda_device", "chunk_policy": "non_cuda"}
         if not self._settings.cuda_adaptive_chunking:
-            return {
-                "chunk_seconds": None,
-                "reason": "adaptive_chunking_disabled",
-                "duration_seconds": _audio_duration_seconds(audio_path),
-                "chunk_policy": "disabled",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
+            return {**base, "chunk_seconds": None, "reason": "adaptive_chunking_disabled", "chunk_policy": "disabled"}
 
-        duration_seconds = _audio_duration_seconds(audio_path)
-
-        if (
-            self._settings.cuda_chunk_seconds_override is not None
-            and self._settings.cuda_chunk_seconds_override > 0
-        ):
-            chunk_seconds = self._settings.cuda_chunk_seconds_override
+        override = self._settings.cuda_chunk_seconds_override
+        if override is not None and override > 0:
+            chunk_seconds = override
             if duration_seconds > 0:
                 chunk_seconds = min(chunk_seconds, int(max(1.0, duration_seconds)))
-            return {
-                "chunk_seconds": max(1, int(chunk_seconds)),
-                "reason": "override",
-                "duration_seconds": duration_seconds,
-                "chunk_policy": "override",
-                "gpu_name": None,
-                "free_gib": None,
-                "total_gib": None,
-            }
+            return {**base, "chunk_seconds": max(1, int(chunk_seconds)), "reason": "override", "chunk_policy": "override"}
 
         available_gib, total_gib, gpu_name = self._cuda_memory_snapshot()
+        base.update(gpu_name=gpu_name, total_gib=total_gib)
         if available_gib is None:
-            return {
-                "chunk_seconds": None,
-                "reason": "memory_probe_failed",
-                "duration_seconds": duration_seconds,
-                "chunk_policy": "unknown",
-                "gpu_name": gpu_name,
-                "free_gib": None,
-                "total_gib": total_gib,
-            }
+            return {**base, "chunk_seconds": None, "reason": "memory_probe_failed", "chunk_policy": "unknown"}
+        base["free_gib"] = available_gib
 
         chunk_seconds = _chunk_seconds_for_available_gib(available_gib)
         chunk_seconds = max(self._settings.cuda_chunk_min_seconds, chunk_seconds)
@@ -458,25 +423,9 @@ class ParakeetModelManager:
         if duration_seconds > 0:
             chunk_seconds = min(chunk_seconds, int(max(1.0, duration_seconds)))
             if duration_seconds <= float(chunk_seconds):
-                return {
-                    "chunk_seconds": None,
-                    "reason": "audio_shorter_than_chunk",
-                    "duration_seconds": duration_seconds,
-                    "chunk_policy": "memory_only",
-                    "gpu_name": gpu_name,
-                    "free_gib": available_gib,
-                    "total_gib": total_gib,
-                }
+                return {**base, "chunk_seconds": None, "reason": "audio_shorter_than_chunk", "chunk_policy": "memory_only"}
 
-        return {
-            "chunk_seconds": max(1, int(chunk_seconds)),
-            "reason": "adaptive",
-            "duration_seconds": duration_seconds,
-            "chunk_policy": "memory_only",
-            "gpu_name": gpu_name,
-            "free_gib": available_gib,
-            "total_gib": total_gib,
-        }
+        return {**base, "chunk_seconds": max(1, int(chunk_seconds)), "reason": "adaptive", "chunk_policy": "memory_only"}
 
     def _log_chunk_plan(self, audio_path: Path, plan: dict[str, Any]) -> None:
         message = (
@@ -972,5 +921,3 @@ def _ensure_safetensors_weights(ckpt_path: Path) -> Path:
 
     logger.info("Wrote safetensors weights at %s.", safetensors_path)
     return safetensors_path
-
-    return MMapSaveRestoreConnector()

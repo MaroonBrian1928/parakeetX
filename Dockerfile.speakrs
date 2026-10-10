@@ -1,0 +1,88 @@
+# syntax=docker/dockerfile:1.7
+
+# Artifact image for the speakrs diarization backend, consumed by Dockerfile.cuda via
+# SPEAKRS_IMAGE and SPEAKRS_VARIANT. Built locally and pushed to GHCR (`mise run
+# speakrs-image`) because the sm_52 ONNX Runtime build takes ~45 minutes.
+#
+#   /opt/speakrs/models/                 speakrs ONNX models at a pinned revision
+#   /opt/speakrs/cuda12/bin/speakrs-diarize  CLI on unmodified upstream speakrs
+#   /opt/speakrs/cuda12/ort/lib/         official ONNX Runtime GPU build (sm_60+)
+#   /opt/speakrs/sm52/bin/speakrs-diarize    CLI on speakrs patched for ONNX Runtime 1.20
+#   /opt/speakrs/sm52/ort/lib/           ONNX Runtime built from source for Maxwell (sm_52)
+#
+# The CLIs load ONNX Runtime dynamically (ORT_DYLIB_PATH).
+
+ARG CUDA_DEVEL_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+# ONNX Runtime for Maxwell: official GPU builds start at sm_60. Built against the same
+# CUDA 12.4 + cuDNN 9 as the cuda-legacy runtime base. Contrib ops (LLM kernels that do
+# not compile for sm_52) are disabled; the speakrs models only use standard ONNX ops.
+FROM ${CUDA_DEVEL_IMAGE} AS ort-sm52
+ARG ORT_VERSION=1.20.1
+ARG ORT_BUILD_JOBS=2
+RUN apt-get update && apt-get install -y --no-install-recommends git python3 python3-pip python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --no-cache-dir "cmake>=3.28,<4" numpy packaging
+WORKDIR /build
+RUN git clone --depth 1 --branch v${ORT_VERSION} --recursive --shallow-submodules \
+    https://github.com/microsoft/onnxruntime.git
+# ONNX Runtime's pinned Eigen archive no longer matches its checksum; check out the pinned commit instead.
+RUN commit=$(grep "^eigen;" onnxruntime/cmake/deps.txt | grep -oE "[0-9a-f]{40}" | head -1) \
+    && for attempt in 1 2 3 4 5; do git clone -q https://gitlab.com/libeigen/eigen.git eigen && break; rm -rf eigen; sleep 30; done \
+    && git -C eigen -c advice.detachedHead=false checkout -q "${commit}"
+RUN cd onnxruntime && ./build.sh --config Release --build_shared_lib --parallel ${ORT_BUILD_JOBS} --nvcc_threads 1 \
+      --use_cuda --cuda_home /usr/local/cuda --cudnn_home /usr --cuda_version 12.4 \
+      --skip_tests --allow_running_as_root --update --build \
+      --use_preinstalled_eigen --eigen_path /build/eigen --disable_contrib_ops --compile_no_warning_as_error \
+      --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=52 onnxruntime_BUILD_UNIT_TESTS=OFF \
+        onnxruntime_USE_FLASH_ATTENTION=OFF onnxruntime_USE_MEMORY_EFFICIENT_ATTENTION=OFF \
+    && mkdir -p /opt/speakrs/sm52/ort/lib \
+    && cp -a build/Linux/Release/libonnxruntime.so* build/Linux/Release/libonnxruntime_providers_*.so \
+      /opt/speakrs/sm52/ort/lib/
+
+FROM ${CUDA_DEVEL_IMAGE} AS ort-cuda12
+ARG ORT_CUDA12_VERSION=1.28.3
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/speakrs/ort-cuda12 \
+    && curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_CUDA12_VERSION}/onnxruntime-linux-x64-gpu_cuda12-${ORT_CUDA12_VERSION}.tgz" \
+      | tar xz -C /opt/speakrs/ort-cuda12 --strip-components=1 --wildcards "*/lib/*.so*"
+
+FROM ${CUDA_DEVEL_IMAGE} AS models
+# Same revision speakrs pins in src/models.rs.
+ARG SPEAKRS_MODELS_REVISION=a785ebdbe6313868088c36c93d9efa71c470bd34
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/speakrs/models && cd /opt/speakrs/models \
+    && for f in plda_lda.npy plda_mean1.npy plda_mean2.npy plda_mu.npy plda_psi.npy plda_tr.npy \
+         segmentation-3.0.onnx segmentation-3.0-b32.onnx \
+         wespeaker-fbank.onnx wespeaker-fbank-b32.onnx \
+         wespeaker-multimask-tail.onnx wespeaker-multimask-tail-b32.onnx \
+         wespeaker-voxceleb-resnet34.onnx wespeaker-voxceleb-resnet34.onnx.data \
+         wespeaker-voxceleb-resnet34-b64.onnx wespeaker-voxceleb-resnet34.min_num_samples.txt; do \
+         curl -fsSL -o "$f" "https://huggingface.co/avencera/speakrs-models/resolve/${SPEAKRS_MODELS_REVISION}/$f"; \
+       done
+
+FROM ${CUDA_DEVEL_IMAGE} AS cli
+ARG SPEAKRS_COMMIT=ab98f35
+# libssl-dev: upstream speakrs keeps ort's default features, whose build script uses native TLS.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH=/root/.cargo/bin:${PATH}
+WORKDIR /build
+RUN git clone -q https://github.com/avencera/speakrs.git speakrs-src && git -C speakrs-src checkout -q ${SPEAKRS_COMMIT}
+COPY speakrs/diarize ./diarize
+# Upstream speakrs pulls in ort's download/TLS build dependencies, hence its own lockfile.
+RUN cd diarize && cp Cargo.upstream.lock Cargo.lock && cargo build --release --locked \
+    && mkdir -p /opt/speakrs/cuda12/bin && cp target/release/speakrs-diarize /opt/speakrs/cuda12/bin/
+COPY speakrs/speakrs-maxwell.patch ./
+COPY speakrs/diarize/Cargo.lock ./diarize/Cargo.lock
+RUN git -C speakrs-src apply ../speakrs-maxwell.patch \
+    && cd diarize && cargo build --release --locked \
+    && mkdir -p /opt/speakrs/sm52/bin && cp target/release/speakrs-diarize /opt/speakrs/sm52/bin/
+
+FROM scratch
+COPY --from=models /opt/speakrs/models /opt/speakrs/models
+COPY --from=cli /opt/speakrs/cuda12/bin /opt/speakrs/cuda12/bin
+COPY --from=ort-cuda12 /opt/speakrs/ort-cuda12 /opt/speakrs/cuda12/ort
+COPY --from=cli /opt/speakrs/sm52/bin /opt/speakrs/sm52/bin
+COPY --from=ort-sm52 /opt/speakrs/sm52/ort /opt/speakrs/sm52/ort

@@ -30,12 +30,15 @@ jobs:
             dockerfile: Dockerfile.cuda
             cache-mode: min
             build-args: |
-              UV_TORCH_INSTALL_FLAGS=--no-cache
+              UV_SYNC_FLAGS=--no-cache
           - variant: cuda-legacy
-            dockerfile: Dockerfile.cuda-legacy
+            dockerfile: Dockerfile.cuda
             cache-mode: min
             build-args: |
-              UV_TORCH_INSTALL_FLAGS=--no-cache
+              UV_SYNC_FLAGS=--no-cache
+              CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+              TORCH_EXTRA=cuda-legacy
+              SPEAKRS_VARIANT=sm52
 
     steps:
       - name: Check out repository

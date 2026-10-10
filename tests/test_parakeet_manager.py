@@ -405,6 +405,35 @@ def test_configure_decoding_can_force_greedy(monkeypatch: pytest.MonkeyPatch) ->
     assert calls == ["greedy"]
 
 
+def test_configure_decoding_uses_greedy_on_old_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    from parakeetx_api_server.model_managers import device_capability
+
+    monkeypatch.setattr(device_capability, "cuda_compute_capability", lambda _device: (5, 2))
+    manager = ParakeetModelManager(ParakeetSettings(device="cuda"))
+    decoding = types.SimpleNamespace(strategy="greedy_batch")
+    calls: list[str] = []
+
+    class FakeOpenDict:
+        def __init__(self, value):
+            self.value = value
+
+        def __enter__(self):
+            return self.value
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setitem(sys.modules, "omegaconf", types.SimpleNamespace(open_dict=FakeOpenDict))
+    model = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(decoding=decoding),
+        change_decoding_strategy=lambda value, *, verbose: calls.append(value.strategy),
+    )
+
+    manager._configure_decoding(model)
+
+    assert calls == ["greedy"]
+
+
 def test_log_chunk_plan_emits_one_line(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
     audio_path = tmp_path / "audio.wav"
     _write_silent_wav(audio_path, duration_seconds=30.0)
