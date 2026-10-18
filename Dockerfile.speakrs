@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 
 # Artifact image for the speakrs diarization backend, consumed by Dockerfile.cuda via
 # SPEAKRS_IMAGE and SPEAKRS_VARIANT. Built locally and pushed to GHCR (`mise run
@@ -12,7 +12,7 @@
 #
 # The CLIs load ONNX Runtime dynamically (ORT_DYLIB_PATH).
 
-ARG CUDA_DEVEL_IMAGE=nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+ARG CUDA_DEVEL_IMAGE=nvidia/cuda:12.9.2-cudnn-devel-ubuntu22.04
 
 # ONNX Runtime for Maxwell: official GPU builds start at sm_60. Built against the same
 # CUDA 12.4 + cuDNN 9 as the cuda-legacy runtime base. Contrib ops (LLM kernels that do
