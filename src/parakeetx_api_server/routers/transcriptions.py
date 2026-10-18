@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
@@ -19,7 +20,15 @@ from ..services.transcription import TranscriptionService
 router = APIRouter(prefix="/v1/audio", tags=["audio"])
 logger = logging.getLogger(__name__)
 
-SUPPORTED_RESPONSE_FORMATS = {"json", "text", "srt", "vtt", "verbose_json", "diarized_json"}
+_RESPONSE_FORMATTERS = {
+    "json": (as_json, JSONResponse),
+    "text": (as_text, PlainTextResponse),
+    "srt": (as_srt, PlainTextResponse),
+    "vtt": (as_vtt, PlainTextResponse),
+    "verbose_json": (as_verbose_json, JSONResponse),
+    "diarized_json": (as_verbose_json, JSONResponse),
+}
+SUPPORTED_RESPONSE_FORMATS = set(_RESPONSE_FORMATTERS)
 SUPPORTED_TIMESTAMP_GRANULARITIES = {"word", "segment"}
 
 
@@ -74,9 +83,6 @@ async def create_transcription(
     timestamp_granularities_plain: str | None = Form(default=None, alias="timestamp_granularities"),
     stream: bool = Form(default=False),
     diarize: bool = Form(default=False),
-    min_speakers: int | None = Form(default=None),
-    max_speakers: int | None = Form(default=None),
-    num_speakers: int | None = Form(default=None),
     speaker_embeddings: bool = Form(default=False),
     highlight_words: bool = Form(default=False),
     prompt: str | None = Form(default=None),
@@ -169,9 +175,6 @@ async def create_transcription(
                 "timestamp_granularities": timestamps,
                 "stream": stream,
                 "diarize": diarize,
-                "min_speakers": min_speakers,
-                "max_speakers": max_speakers,
-                "num_speakers": num_speakers,
                 "speaker_embeddings": speaker_embeddings,
                 "highlight_words": highlight_words,
                 "prompt_present": bool(prompt),
@@ -232,9 +235,6 @@ async def create_transcription(
             upload=file,
             language=language,
             diarize=diarize,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            num_speakers=num_speakers,
             vad_options=vad_options,
             forced_alignment=settings.forced_alignment.enabled or forced_alignment,
         )
@@ -252,20 +252,13 @@ async def create_transcription(
     payload["model"] = resolved_model
 
     stage_started = time.perf_counter()
-    if response_format == "text":
-        response = PlainTextResponse(as_text(payload), media_type="text/plain; charset=utf-8")
-    elif response_format == "json":
-        response = JSONResponse(as_json(payload))
-    elif response_format == "diarized_json":
-        response = JSONResponse(as_verbose_json(payload))
-    elif response_format == "verbose_json":
-        response = JSONResponse(as_verbose_json(payload))
-    elif response_format == "srt":
-        response = PlainTextResponse(as_srt(payload), media_type="text/plain; charset=utf-8")
-    elif response_format == "vtt":
-        response = PlainTextResponse(as_vtt(payload), media_type="text/plain; charset=utf-8")
+    formatter, response_cls = _RESPONSE_FORMATTERS[response_format]
+    # Formatting is O(words x segments) on long audio; keep it off the event loop.
+    content = await asyncio.to_thread(formatter, payload)
+    if response_cls is PlainTextResponse:
+        response = PlainTextResponse(content, media_type="text/plain; charset=utf-8")
     else:
-        raise HTTPException(status_code=500, detail="Unexpected response format")
+        response = JSONResponse(content)
 
     _emit_route_timing(
         "route_response_format",

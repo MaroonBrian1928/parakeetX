@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import resource
 import sys
 import tempfile
 import time
@@ -26,9 +27,6 @@ class _TranscriptionRequestKey:
     audio_sha256: str
     language: str | None
     diarize: bool
-    min_speakers: int | None
-    max_speakers: int | None
-    num_speakers: int | None
     vad_options: VadOptions
     forced_alignment: bool
 
@@ -59,18 +57,40 @@ class TranscriptionService:
         self._inflight_lock = asyncio.Lock()
         self._inflight: dict[_TranscriptionRequestKey, asyncio.Task[dict[str, Any]]] = {}
 
-    @staticmethod
-    def _release_cuda_cache() -> None:
+    def _memory_note(self) -> str:
+        """Memory snapshot for stage timing lines; VRAM peak is reset so each note covers one stage.
+
+        Diagnostics only: any failure yields a partial note rather than failing the request.
+        """
+        rss_peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2
+        parts = [f"rss_peak_gib={rss_peak_gib:.2f}"]
         try:
-            import gc
-
-            import torch
-
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            resident = [
+                name
+                for name, manager in (
+                    ("asr", self._parakeet_manager),
+                    ("fa", self._forced_alignment_manager),
+                    ("diar", self._diarization_manager),
+                )
+                if manager.status()["loaded"]
+            ]
+            parts.insert(0, f"resident={','.join(resident) or 'none'}")
         except Exception:
             pass
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                free_bytes, _ = torch.cuda.mem_get_info()
+                parts += [
+                    f"vram_alloc_gib={torch.cuda.memory_allocated() / 1024**3:.2f}",
+                    f"vram_peak_gib={torch.cuda.max_memory_allocated() / 1024**3:.2f}",
+                    f"vram_free_gib={free_bytes / 1024**3:.2f}",
+                ]
+                torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
+        return " ".join(parts)
 
     @property
     def configured_model_name(self) -> str:
@@ -102,9 +122,6 @@ class TranscriptionService:
                         normalized_path=normalized_path,
                         language=key.language,
                         diarize=key.diarize,
-                        min_speakers=key.min_speakers,
-                        max_speakers=key.max_speakers,
-                        num_speakers=key.num_speakers,
                         vad_options=key.vad_options,
                         forced_alignment=key.forced_alignment,
                         request_started=request_started,
@@ -139,9 +156,6 @@ class TranscriptionService:
         upload: UploadFile,
         language: str | None,
         diarize: bool,
-        min_speakers: int | None,
-        max_speakers: int | None,
-        num_speakers: int | None,
         vad_options: VadOptions,
         forced_alignment: bool,
     ) -> dict[str, Any]:
@@ -175,9 +189,6 @@ class TranscriptionService:
                     audio_sha256=audio_sha256,
                     language=language,
                     diarize=diarize,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_speakers=num_speakers,
                     vad_options=vad_options,
                     forced_alignment=forced_alignment,
                 )
@@ -198,9 +209,6 @@ class TranscriptionService:
         normalized_path: Path,
         language: str | None,
         diarize: bool,
-        min_speakers: int | None,
-        max_speakers: int | None,
-        num_speakers: int | None,
         vad_options: VadOptions,
         forced_alignment: bool,
         request_started: float,
@@ -257,11 +265,12 @@ class TranscriptionService:
                 request_started=request_started,
                 extra=(
                     f"words={len(asr_payload.get('words', []))} "
-                    f"segments={len(asr_payload.get('segments', []))}"
+                    f"segments={len(asr_payload.get('segments', []))} "
+                    f"{self._memory_note()}"
                 ),
             )
             if self._empty_cuda_cache_after_stage:
-                self._release_cuda_cache()
+                release_memory_to_os(clear_cuda=True)
 
             if forced_alignment and self._forced_alignment_manager.settings.method == "qwen":
                 if self._unload_asr_before_forced_alignment:
@@ -286,10 +295,13 @@ class TranscriptionService:
                     "forced_alignment",
                     stage_started,
                     request_started=request_started,
-                    extra=("method=qwen " f"words={len(asr_payload.get('words', []))}"),
+                    extra=(
+                        f"method=qwen words={len(asr_payload.get('words', []))} "
+                        f"{self._memory_note()}"
+                    ),
                 )
                 if self._empty_cuda_cache_after_stage:
-                    self._release_cuda_cache()
+                    release_memory_to_os(clear_cuda=True)
             elif forced_alignment:
                 _emit_stage_timing(
                     "forced_alignment",
@@ -315,17 +327,11 @@ class TranscriptionService:
                         self._diarization_manager.diarize_regions,
                         normalized_path,
                         vad_segments,
-                        min_speakers=min_speakers,
-                        max_speakers=max_speakers,
-                        num_speakers=num_speakers,
                     )
                 else:
                     diarization_segments = await asyncio.to_thread(
                         self._diarization_manager.diarize,
                         normalized_path,
-                        min_speakers=min_speakers,
-                        max_speakers=max_speakers,
-                        num_speakers=num_speakers,
                     )
                 _emit_stage_timing(
                     "diarization",
@@ -333,14 +339,16 @@ class TranscriptionService:
                     request_started=request_started,
                     extra=(
                         f"segments={len(diarization_segments)} "
-                        f"vad_compacted={str(vad_options.enabled).lower()}"
+                        f"vad_compacted={str(vad_options.enabled).lower()} "
+                        f"{self._memory_note()}"
                     ),
                 )
                 if self._empty_cuda_cache_after_stage:
-                    self._release_cuda_cache()
+                    release_memory_to_os(clear_cuda=True)
 
             stage_started = time.perf_counter()
-            words, segments = assign_speakers(
+            words, segments = await asyncio.to_thread(
+                assign_speakers,
                 list(asr_payload.get("words", [])),
                 list(asr_payload.get("segments", [])),
                 diarization_segments,

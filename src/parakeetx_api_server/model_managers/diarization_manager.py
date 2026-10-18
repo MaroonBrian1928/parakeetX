@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
+import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,19 +44,16 @@ class DiarizationModelManager:
             unload=self.unload_model,
         )
 
-    @property
-    def configured_model_name(self) -> str:
-        return self._settings.model_name
-
     def status(self) -> dict[str, Any]:
         return {
             "loaded": self._is_loaded(),
+            "backend": self._settings.backend,
             "model_name": self._settings.model_name,
             "device": self._settings.device,
             "segmentation_batch_size": self._settings.segmentation_batch_size,
             "embedding_batch_size": self._settings.embedding_batch_size,
             "idle_evict_minutes": self._idle_evictor.idle_minutes,
-            "requires_hf_token": True,
+            "requires_hf_token": self._settings.backend == "pyannote",
         }
 
     def load_model(self) -> dict[str, Any]:
@@ -62,6 +64,12 @@ class DiarizationModelManager:
             status["idle_evict_minutes"] = self._idle_evictor.idle_minutes
             return status
 
+        if self._settings.backend == "speakrs":
+            # speakrs runs as a subprocess per request; there is nothing to keep resident.
+            if not self._speakrs_binary().is_file():
+                raise RuntimeError(f"speakrs-diarize not found at {self._speakrs_binary()}")
+            return self.status()
+
         if not self._hf_token:
             raise RuntimeError("HF_TOKEN is required to load diarization model")
 
@@ -69,6 +77,7 @@ class DiarizationModelManager:
             if self._pipeline is not None:
                 return self.status()
 
+            load_started = time.perf_counter()
             try:
                 from pyannote.audio import Pipeline
             except ImportError as exc:
@@ -112,6 +121,7 @@ class DiarizationModelManager:
                         MIN_FP16_CAPABILITY,
                     )
             self._pipeline = pipeline
+            print(f"Model load: diarization elapsed={time.perf_counter() - load_started:.2f}s", file=sys.stderr, flush=True)
 
         self._idle_evictor.note_loaded()
         return self.status()
@@ -127,119 +137,46 @@ class DiarizationModelManager:
 
         with self._lock:
             self._pipeline = None
-            self._idle_evictor.cancel()
-            if self._settings.device.startswith("cuda"):
-                try:
-                    import torch
-
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-        release_memory_to_os()
+        self._idle_evictor.cancel()
+        release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
         return self.status()
 
     def diarize(
         self,
         audio_path: Path,
-        *,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        num_speakers: int | None = None,
     ) -> list[dict[str, Any]]:
         if self._worker_client is not None:
             with self._idle_evictor.use():
-                result = self._worker_client.diarize(
-                    audio_path,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_speakers=num_speakers,
-                )
+                result = self._worker_client.diarize(audio_path)
                 self._worker_loaded = True
                 return result
 
-        with self._idle_evictor.use():
-            pipeline = self._pipeline
-            if pipeline is None:
-                self.load_model()
-                pipeline = self._pipeline
+        if self._settings.backend == "speakrs":
+            return self._run_speakrs(audio_path)
 
-            if pipeline is None:
-                raise RuntimeError("Diarization model failed to load")
-
-            kwargs: dict[str, Any] = {}
-            if min_speakers is not None:
-                kwargs["min_speakers"] = min_speakers
-            if max_speakers is not None:
-                kwargs["max_speakers"] = max_speakers
-            if num_speakers is not None:
-                kwargs["num_speakers"] = num_speakers
-
-            annotation = self._run_pipeline(pipeline, audio_path, kwargs)
-
-            iterable_annotation = annotation
-            if not hasattr(iterable_annotation, "itertracks"):
-                wrapped = getattr(annotation, "speaker_diarization", None)
-                if wrapped is not None and hasattr(wrapped, "itertracks"):
-                    iterable_annotation = wrapped
-
-            if not hasattr(iterable_annotation, "itertracks"):
-                raise RuntimeError(
-                    f"Unsupported diarization output type: {type(annotation).__name__}"
-                )
-
-            try:
-                diarization_segments: list[dict[str, Any]] = []
-                for segment, _, speaker in iterable_annotation.itertracks(yield_label=True):
-                    diarization_segments.append(
-                        {
-                            "start": float(segment.start),
-                            "end": float(segment.end),
-                            "speaker": str(speaker),
-                        }
-                    )
-
-                return diarization_segments
-            finally:
-                del annotation
-                del iterable_annotation
+        waveform, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+        return self._diarize_waveform(
+            waveform,
+            int(sample_rate),
+        )
 
     def diarize_regions(
         self,
         audio_path: Path,
         regions: list[dict[str, Any]],
-        *,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        num_speakers: int | None = None,
     ) -> list[dict[str, Any]]:
         if self._worker_client is not None:
             with self._idle_evictor.use():
-                result = self._worker_client.diarize_regions(
-                    audio_path,
-                    regions,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    num_speakers=num_speakers,
-                )
+                result = self._worker_client.diarize_regions(audio_path, regions)
                 self._worker_loaded = True
                 return result
 
-        return self._diarize_regions_local(
-            audio_path,
-            regions,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            num_speakers=num_speakers,
-        )
+        return self._diarize_regions_local(audio_path, regions)
 
     def _diarize_regions_local(
         self,
         audio_path: Path,
         regions: list[dict[str, Any]],
-        *,
-        min_speakers: int | None = None,
-        max_speakers: int | None = None,
-        num_speakers: int | None = None,
     ) -> list[dict[str, Any]]:
         speech_intervals = _speech_intervals_from_vad_regions(regions)
         if not speech_intervals:
@@ -253,12 +190,7 @@ class DiarizationModelManager:
             total_frames=total_frames,
             sample_rate=sample_rate,
         ):
-            return self.diarize(
-                audio_path,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-                num_speakers=num_speakers,
-            )
+            return self.diarize(audio_path)
 
         compact_chunks: list[np.ndarray] = []
         mapping: list[dict[str, float]] = []
@@ -295,7 +227,22 @@ class DiarizationModelManager:
         if not compact_chunks:
             return []
 
-        compact_audio = np.concatenate(compact_chunks, axis=0)
+        compact_segments = self._diarize_waveform(
+            np.concatenate(compact_chunks, axis=0),
+            sample_rate,
+        )
+        return _map_compact_diarization_to_original(compact_segments, mapping)
+
+    def _diarize_waveform(
+        self,
+        waveform: np.ndarray,
+        sample_rate: int,
+    ) -> list[dict[str, Any]]:
+        if self._settings.backend == "speakrs":
+            with tempfile.TemporaryDirectory(prefix="parakeetx-speakrs-") as tmpdir:
+                wav_path = Path(tmpdir) / "audio.wav"
+                sf.write(str(wav_path), waveform, sample_rate, format="WAV", subtype="PCM_16")
+                return self._run_speakrs(wav_path)
 
         with self._idle_evictor.use():
             pipeline = self._pipeline
@@ -305,43 +252,62 @@ class DiarizationModelManager:
             if pipeline is None:
                 raise RuntimeError("Diarization model failed to load")
 
-            kwargs: dict[str, Any] = {}
-            if min_speakers is not None:
-                kwargs["min_speakers"] = min_speakers
-            if max_speakers is not None:
-                kwargs["max_speakers"] = max_speakers
-            if num_speakers is not None:
-                kwargs["num_speakers"] = num_speakers
-
-            annotation = self._run_pipeline(
-                pipeline,
-                None,
-                kwargs,
-                waveform=compact_audio,
-                sample_rate=sample_rate,
-            )
-
-            iterable_annotation = annotation
-            if not hasattr(iterable_annotation, "itertracks"):
-                wrapped = getattr(annotation, "speaker_diarization", None)
-                if wrapped is not None and hasattr(wrapped, "itertracks"):
-                    iterable_annotation = wrapped
-            if not hasattr(iterable_annotation, "itertracks"):
+            annotation = self._run_pipeline(pipeline, waveform, sample_rate)
+            # pyannote 4 wraps the Annotation in a DiarizeOutput.
+            if not hasattr(annotation, "itertracks"):
+                annotation = getattr(annotation, "speaker_diarization", annotation)
+            if not hasattr(annotation, "itertracks"):
                 raise RuntimeError(
                     f"Unsupported diarization output type: {type(annotation).__name__}"
                 )
 
-            compact_segments: list[dict[str, Any]] = []
-            for segment, _, speaker in iterable_annotation.itertracks(yield_label=True):
-                compact_segments.append(
-                    {
-                        "start": float(segment.start),
-                        "end": float(segment.end),
-                        "speaker": str(speaker),
-                    }
-                )
+            return [
+                {"start": float(segment.start), "end": float(segment.end), "speaker": str(speaker)}
+                for segment, _, speaker in annotation.itertracks(yield_label=True)
+            ]
 
-        return _map_compact_diarization_to_original(compact_segments, mapping)
+    def _speakrs_binary(self) -> Path:
+        return Path(self._settings.speakrs_home) / "bin" / "speakrs-diarize"
+
+    def _run_speakrs(
+        self,
+        audio_path: Path,
+    ) -> list[dict[str, Any]]:
+        home = Path(self._settings.speakrs_home)
+        ort_lib = home / "ort" / "lib"
+        mode = "cuda" if self._settings.device.startswith("cuda") else "cpu"
+        env = {
+            **os.environ,
+            "ORT_DYLIB_PATH": str(ort_lib / "libonnxruntime.so"),
+            "LD_LIBRARY_PATH": os.pathsep.join(
+                filter(None, [str(ort_lib), os.environ.get("LD_LIBRARY_PATH")])
+            ),
+        }
+        command = [str(self._speakrs_binary()), mode, str(home / "models"), str(audio_path)]
+
+        started = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=self._settings.speakrs_timeout_seconds,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"speakrs-diarize not found at {command[0]}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"speakrs diarization timed out after {self._settings.speakrs_timeout_seconds:.0f}s"
+            ) from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"speakrs diarization failed: {completed.stderr.strip()[-2000:]}")
+        print(
+            f"Diarization timing: backend=speakrs mode={mode} elapsed={time.perf_counter() - started:.2f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _parse_rttm(completed.stdout)
 
     def _is_loaded(self) -> bool:
         if self._worker_client is not None:
@@ -366,34 +332,22 @@ class DiarizationModelManager:
     def _run_pipeline(
         self,
         pipeline: Any,
-        audio_path: Path | None,
-        kwargs: dict[str, Any],
-        *,
-        waveform: np.ndarray | None = None,
-        sample_rate: int | None = None,
+        waveform: np.ndarray,
+        sample_rate: int,
     ) -> Any:
-        if waveform is None:
-            if audio_path is None:
-                raise ValueError("_run_pipeline requires audio_path or waveform")
-            file_waveform, file_sample_rate = sf.read(
-                str(audio_path), dtype="float32", always_2d=True
-            )
-            mono = np.asarray(file_waveform, dtype=np.float32).mean(axis=1)
-            sample_rate = int(file_sample_rate)
-        else:
-            mono = np.asarray(waveform, dtype=np.float32)
-            if mono.ndim == 2:
-                mono = mono.mean(axis=1)
-            if sample_rate is None:
-                raise ValueError("sample_rate required when passing waveform")
-
         import torch
 
+        mono = np.asarray(waveform, dtype=np.float32)
+        if mono.ndim == 2:
+            mono = mono.mean(axis=1)
         audio_input = {
             "waveform": torch.from_numpy(mono).unsqueeze(0),
             "sample_rate": int(sample_rate),
         }
-        return pipeline(audio_input, **kwargs)
+        timer = _PipelineStageTimer()
+        result = pipeline(audio_input, hook=timer)
+        timer.log()
+        return result
 
     def _apply_half_precision(self, pipeline: Any) -> None:
         """Convert pyannote's embedding model to FP16 in place and wrap its forward
@@ -430,6 +384,34 @@ class DiarizationModelManager:
         logger.info("Pyannote FP16 conversion: %d submodules", converted)
 
 
+class _PipelineStageTimer:
+    """pyannote progress hook that logs how long each pipeline step took.
+
+    pyannote calls the hook as each step finishes (and during segmentation and
+    embedding progress), so a step's duration runs from the previous step's
+    last call to its own last call. Clustering happens between "embeddings"
+    and "discrete_diarization"; "finalize" covers exclusive-diarization
+    reconstruction and conversion after the last hook call.
+    """
+
+    def __init__(self) -> None:
+        self._started = time.perf_counter()
+        self._last_call: dict[str, float] = {}
+
+    def __call__(self, step_name: str, step_artifact: Any, **kwargs: Any) -> None:
+        self._last_call[step_name] = time.perf_counter()
+
+    def log(self) -> None:
+        parts = []
+        previous = self._started
+        for step_name, finished in self._last_call.items():
+            label = "clustering" if step_name == "discrete_diarization" else step_name
+            parts.append(f"{label}={finished - previous:.2f}s")
+            previous = finished
+        parts.append(f"finalize={time.perf_counter() - previous:.2f}s")
+        print(f"Diarization timing: {' '.join(parts)}", file=sys.stderr, flush=True)
+
+
 def _wrap_forward_with_dtype_cast(model: Any) -> None:
     """Replace model.forward with a wrapper that casts float-tensor args to the
     model's parameter dtype, so callers (like pyannote's Inference) that don't
@@ -458,6 +440,17 @@ def _wrap_forward_with_dtype_cast(model: Any) -> None:
         return original_forward(*cast_args, **cast_kwargs)
 
     model.forward = _wrapped_forward
+
+
+def _parse_rttm(rttm: str) -> list[dict[str, Any]]:
+    # SPEAKER <file> <channel> <start> <duration> <NA> <NA> <speaker> <NA> <NA>
+    segments = []
+    for line in rttm.splitlines():
+        fields = line.split()
+        if len(fields) >= 8 and fields[0] == "SPEAKER":
+            start = float(fields[3])
+            segments.append({"start": start, "end": start + float(fields[4]), "speaker": fields[7]})
+    return segments
 
 
 def _speech_intervals_from_vad_regions(

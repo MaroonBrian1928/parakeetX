@@ -84,12 +84,14 @@ class IdleModelEvictor:
 
             self._timer = None
 
-        logger.info(
-            "Unloading %s model after %.2f minutes idle.",
-            self._model_label,
-            idle_for / 60.0,
-        )
-        self._unload()
+            # Unload under the lock so a request can't enter use() between the idle check and the
+            # unload. Managers must not call into the evictor while holding their own locks.
+            logger.info(
+                "Unloading %s model after %.2f minutes idle.",
+                self._model_label,
+                idle_for / 60.0,
+            )
+            self._unload()
 
 
 def _idle_seconds(idle_minutes: float | None) -> float | None:

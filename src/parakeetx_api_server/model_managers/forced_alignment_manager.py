@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import tempfile
-from dataclasses import dataclass
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import numpy as np
 import soundfile as sf
 
 from ..config import ForcedAlignmentSettings
+from ..memory import release_memory_to_os
 from .device_capability import (
     MIN_BF16_CAPABILITY,
     MIN_FLASH_ATTENTION_CAPABILITY,
@@ -18,6 +20,7 @@ from .device_capability import (
     cuda_compute_capability,
     meets_capability,
 )
+from .idle_eviction import IdleModelEvictor
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +51,22 @@ _LANGUAGE_NAMES = {
 }
 
 
-@dataclass(frozen=True)
-class ForcedAlignmentOptions:
-    enabled: bool
-
-
 class ForcedAlignmentModelManager:
-    def __init__(self, settings: ForcedAlignmentSettings) -> None:
+    def __init__(
+        self,
+        settings: ForcedAlignmentSettings,
+        *,
+        idle_evict_minutes: float | None = None,
+    ) -> None:
         self._settings = settings
         self._model: Any | None = None
         self._lock = threading.Lock()
+        self._idle_evictor = IdleModelEvictor(
+            model_label="forced_alignment",
+            idle_minutes=idle_evict_minutes,
+            is_loaded=lambda: self._model is not None,
+            unload=self.unload_model,
+        )
 
     @property
     def settings(self) -> ForcedAlignmentSettings:
@@ -74,12 +83,20 @@ class ForcedAlignmentModelManager:
             "attn_implementation": self._settings.attn_implementation,
             "max_chunk_seconds": self._settings.max_chunk_seconds,
             "preload_model": self._settings.preload_model,
+            "idle_evict_minutes": self._idle_evictor.idle_minutes,
         }
 
     def load_model(self) -> dict[str, Any]:
+        self._ensure_model()
+        self._idle_evictor.note_loaded()
+        return self.status()
+
+    def _ensure_model(self) -> Any:
+        """Load the aligner if needed and return it, captured under the lock so a concurrent
+        unload can't clear it between loading and use."""
         with self._lock:
             if self._model is not None:
-                return self.status()
+                return self._model
 
             try:
                 import torch
@@ -97,11 +114,13 @@ class ForcedAlignmentModelManager:
             if attn_implementation:
                 kwargs["attn_implementation"] = attn_implementation
 
+            load_started = time.perf_counter()
             self._model = Qwen3ForcedAligner.from_pretrained(
                 self._settings.model_name,
                 **kwargs,
             )
-            return self.status()
+            print(f"Model load: forced_alignment elapsed={time.perf_counter() - load_started:.2f}s", file=sys.stderr, flush=True)
+            return self._model
 
     def _resolve_dtype(self) -> str:
         dtype = self._settings.dtype
@@ -136,31 +155,9 @@ class ForcedAlignmentModelManager:
     def unload_model(self) -> dict[str, Any]:
         with self._lock:
             self._model = None
+        self._idle_evictor.cancel()
+        release_memory_to_os(clear_cuda=self._settings.device.startswith("cuda"))
         return self.status()
-
-    def align(
-        self,
-        audio_path: Path,
-        *,
-        text: str,
-        language: str | None,
-    ) -> list[dict[str, Any]]:
-        if not text.strip():
-            return []
-        if self._model is None:
-            self.load_model()
-        if self._model is None:
-            raise RuntimeError("Qwen3 forced aligner did not load")
-
-        results = self._model.align(
-            audio=str(audio_path),
-            text=text,
-            language=_language_name(language),
-        )
-        if not results:
-            return []
-
-        return [_alignment_item_to_word(item) for item in results[0]]
 
     def align_segments(
         self,
@@ -181,64 +178,63 @@ class ForcedAlignmentModelManager:
         total_frames = int(info.frames)
         aligned_words: list[dict[str, Any]] = []
 
-        if self._model is None:
-            self.load_model()
-        if self._model is None:
-            raise RuntimeError("Qwen3 forced aligner did not load")
+        with self._idle_evictor.use():
+            # A local reference keeps the unload route from breaking an in-flight request.
+            model = self._ensure_model()
 
-        language_name = _language_name(language)
-        batch_size = max(1, int(self._settings.batch_size))
+            language_name = _language_name(language)
+            batch_size = max(1, int(self._settings.batch_size))
 
-        with tempfile.TemporaryDirectory(
-            prefix="parakeetx-qwen-align-",
-            dir=str(audio_path.parent),
-        ) as tmpdir:
-            chunk_dir = Path(tmpdir)
-            prepared: list[tuple[Path, str, float]] = []
-            for index, chunk in enumerate(chunks):
-                start_seconds = max(0.0, float(chunk["start"]))
-                end_seconds = max(start_seconds, float(chunk["end"]))
-                text = str(chunk["text"]).strip()
-                if not text:
-                    continue
+            with tempfile.TemporaryDirectory(
+                prefix="parakeetx-qwen-align-",
+                dir=str(audio_path.parent),
+            ) as tmpdir:
+                chunk_dir = Path(tmpdir)
+                prepared: list[tuple[Path, str, float]] = []
+                for index, chunk in enumerate(chunks):
+                    start_seconds = max(0.0, float(chunk["start"]))
+                    end_seconds = max(start_seconds, float(chunk["end"]))
+                    text = str(chunk["text"]).strip()
+                    if not text:
+                        continue
 
-                start_frame = min(total_frames, max(0, int(start_seconds * sample_rate)))
-                end_frame = min(total_frames, max(start_frame, int(end_seconds * sample_rate)))
-                if end_frame <= start_frame:
-                    continue
+                    start_frame = min(total_frames, max(0, int(start_seconds * sample_rate)))
+                    end_frame = min(total_frames, max(start_frame, int(end_seconds * sample_rate)))
+                    if end_frame <= start_frame:
+                        continue
 
-                audio_chunk, _ = sf.read(
-                    str(audio_path),
-                    start=start_frame,
-                    stop=end_frame,
-                    dtype="float32",
-                    always_2d=False,
-                )
-                if audio_chunk.size == 0:
-                    continue
+                    audio_chunk, _ = sf.read(
+                        str(audio_path),
+                        start=start_frame,
+                        stop=end_frame,
+                        dtype="float32",
+                        always_2d=False,
+                    )
+                    if audio_chunk.size == 0:
+                        continue
 
-                chunk_path = chunk_dir / f"align_chunk_{index:04d}.wav"
-                sf.write(
-                    str(chunk_path),
-                    np.asarray(audio_chunk, dtype=np.float32),
-                    sample_rate,
-                    format="WAV",
-                    subtype="PCM_16",
-                )
-                prepared.append((chunk_path, text, float(start_frame) / float(sample_rate)))
+                    chunk_path = chunk_dir / f"align_chunk_{index:04d}.wav"
+                    sf.write(
+                        str(chunk_path),
+                        np.asarray(audio_chunk, dtype=np.float32),
+                        sample_rate,
+                        format="WAV",
+                        subtype="PCM_16",
+                    )
+                    prepared.append((chunk_path, text, float(start_frame) / float(sample_rate)))
 
-            for batch_start in range(0, len(prepared), batch_size):
-                batch = prepared[batch_start : batch_start + batch_size]
-                audios = [str(p) for p, _, _ in batch]
-                texts = [t for _, t, _ in batch]
-                results = self._model.align(
-                    audio=audios,
-                    text=texts,
-                    language=[language_name] * len(batch),
-                )
-                for (_, _, offset), result in zip(batch, results):
-                    chunk_words = [_alignment_item_to_word(item) for item in result]
-                    aligned_words.extend(_offset_words(chunk_words, offset=offset))
+                for batch_start in range(0, len(prepared), batch_size):
+                    batch = prepared[batch_start : batch_start + batch_size]
+                    audios = [str(p) for p, _, _ in batch]
+                    texts = [t for _, t, _ in batch]
+                    results = model.align(
+                        audio=audios,
+                        text=texts,
+                        language=[language_name] * len(batch),
+                    )
+                    for (_, _, offset), result in zip(batch, results):
+                        chunk_words = [_alignment_item_to_word(item) for item in result]
+                        aligned_words.extend(_offset_words(chunk_words, offset=offset))
 
         return aligned_words
 

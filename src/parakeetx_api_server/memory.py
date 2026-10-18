@@ -9,10 +9,10 @@ logger = logging.getLogger(__name__)
 
 
 def release_memory_to_os(*, clear_cuda: bool = False) -> None:
+    gc.collect()
     if clear_cuda:
         _clear_cuda_cache()
 
-    gc.collect()
     if not sys.platform.startswith("linux"):
         return
 

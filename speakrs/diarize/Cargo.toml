@@ -1,0 +1,12 @@
+[package]
+name = "speakrs-diarize"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Path is where Dockerfile.speakrs checks out the pinned, patched speakrs source.
+speakrs = { path = "../speakrs-src", default-features = false, features = ["cuda", "load-dynamic", "default-linalg"] }
+
+[profile.release]
+lto = "thin"

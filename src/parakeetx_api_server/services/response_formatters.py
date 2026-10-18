@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from typing import Any
 
 
@@ -48,33 +49,25 @@ def _segments_with_words(
     segments: list[dict[str, Any]],
     word_segments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Attach each word to every segment whose [start, end] contains its midpoint."""
+    order = sorted(range(len(word_segments)), key=lambda i: _word_midpoint(word_segments[i]))
+    midpoints = [_word_midpoint(word_segments[i]) for i in order]
     output: list[dict[str, Any]] = []
 
     for segment in segments:
-        segment_start = float(segment.get("start", 0.0))
-        segment_end = float(segment.get("end", 0.0))
-        segment_words = [
-            word
-            for word in word_segments
-            if _word_belongs_to_segment(word, segment_start, segment_end)
-        ]
-
+        lo = bisect_left(midpoints, float(segment.get("start", 0.0)))
+        hi = bisect_right(midpoints, float(segment.get("end", 0.0)))
         output_segment = dict(segment)
-        output_segment["words"] = segment_words
+        output_segment["words"] = [word_segments[i] for i in sorted(order[lo:hi])]
         output.append(output_segment)
 
     return output
 
 
-def _word_belongs_to_segment(
-    word: dict[str, Any],
-    segment_start: float,
-    segment_end: float,
-) -> bool:
+def _word_midpoint(word: dict[str, Any]) -> float:
     word_start = float(word.get("start", 0.0))
     word_end = float(word.get("end", word_start))
-    word_midpoint = word_start + max(0.0, word_end - word_start) / 2.0
-    return segment_start <= word_midpoint <= segment_end
+    return word_start + max(0.0, word_end - word_start) / 2.0
 
 
 def _as_whisperx_word(word: dict[str, Any]) -> dict[str, Any]:

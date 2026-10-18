@@ -28,8 +28,15 @@ vad = [
 forced-alignment = [
   "qwen-asr>=0.0.6",
 ]
+# Pick one: each pins the torch build its Docker image ships (see [tool.uv.sources]).
 cuda = [
-  "torch>=2.3.0",
+  "torch==2.10.0",
+  "torchaudio==2.10.0",
+]
+# Maxwell/Pascal: cu126 is the newest torch flavor that still ships sm_50/sm_60 kernels.
+cuda-legacy = [
+  "torch==2.10.0",
+  "torchaudio==2.10.0",
 ]
 
 [dependency-groups]
@@ -42,12 +49,36 @@ dev = [
 requires = ["hatchling>=1.24.0"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+conflicts = [[{ extra = "cuda" }, { extra = "cuda-legacy" }]]
+# NeMo's CUDA-graph decoder compiles kernels through cuda-bindings' NVRTC. cuda-bindings 13 loads
+# NVRTC 13 (sm_75+ only, driver 580+); 12.x uses the NVRTC 12 that the cu126/cu128 torch wheels ship.
+# torch 2.11 requires cuda-bindings 13, so the lock settles on torch 2.10; keep torchaudio on the same release.
+constraint-dependencies = ["cuda-bindings<13", "torchaudio<2.11"]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", extra = "cuda", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cu126", extra = "cuda-legacy", marker = "sys_platform == 'linux'" },
+]
+torchaudio = [
+  { index = "pytorch-cu128", extra = "cuda", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cu126", extra = "cuda-legacy", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/parakeetx_api_server"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 addopts = "-q"
-
-[project.scripts]
-parakeetx-api-server = "parakeetx_api_server.main:app"

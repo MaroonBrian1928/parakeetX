@@ -3,7 +3,11 @@ services:
     image: ghcr.io/maroonbrian1928/parakeetx:cuda-legacy
     build:
       context: .
-      dockerfile: Dockerfile.cuda-legacy
+      dockerfile: Dockerfile.cuda
+      args:
+        CUDA_IMAGE: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+        TORCH_EXTRA: cuda-legacy
+        SPEAKRS_VARIANT: sm52
     restart: unless-stopped
     env_file:
       - .env
@@ -13,8 +17,23 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     ports:
       - "${HOST_PORT:-7474}:${UVICORN_PORT:-7474}"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      # The sm_52 speakrs/ONNX Runtime build is JIT-compiled on Pascal and newer, once per speakrs
+      # process unless the CUDA JIT cache persists.
+      - cuda-cache:/root/.nv/ComputeCache
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: ["gpu"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${UVICORN_PORT:-7474}/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  hf-cache:
+  cuda-cache:

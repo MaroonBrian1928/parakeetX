@@ -52,21 +52,34 @@ class ParakeetSettings(BaseModel):
 
 
 class DiarizationSettings(BaseModel):
+    backend: str = "speakrs"
     model_name: str = "pyannote/speaker-diarization-community-1"
     device: str = "cpu"
     preload_model: bool = False
     segmentation_batch_size: int = Field(default=64, ge=1)
     embedding_batch_size: int = Field(default=64, ge=1)
     cuda_half_precision: bool = False
+    # Install root of the speakrs-diarize binary, its ONNX models and ONNX Runtime (see Dockerfile.speakrs).
+    speakrs_home: str = "/opt/speakrs"
+    # A hung speakrs-diarize otherwise blocks the request forever while /health keeps answering.
+    speakrs_timeout_seconds: float = Field(default=1800.0, gt=0)
 
     @field_validator("*", mode="before")
     @classmethod
     def _strip_string_values(cls, value: object) -> object:
         return _strip_env_string(value)
 
+    @field_validator("backend")
+    @classmethod
+    def _validate_backend(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized not in {"pyannote", "speakrs"}:
+            raise ValueError("diarization backend must be pyannote or speakrs")
+        return normalized
+
 
 class VadSettings(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     method: str = "silero"
     preload_model: bool = False
     device: str = "auto"

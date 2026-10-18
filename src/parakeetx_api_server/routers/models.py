@@ -57,7 +57,7 @@ async def model_status(
 
 
 @router.post("/parakeet/load", dependencies=[Depends(require_api_key)])
-async def load_parakeet(
+def load_parakeet(
     parakeet: ParakeetModelManager = Depends(get_parakeet_manager),
 ):
     try:
@@ -67,14 +67,14 @@ async def load_parakeet(
 
 
 @router.post("/parakeet/unload", dependencies=[Depends(require_api_key)])
-async def unload_parakeet(
+def unload_parakeet(
     parakeet: ParakeetModelManager = Depends(get_parakeet_manager),
 ):
     return parakeet.unload_model()
 
 
 @router.post("/diarization/load", dependencies=[Depends(require_api_key)])
-async def load_diarization(
+def load_diarization(
     diarization: DiarizationModelManager = Depends(get_diarization_manager),
 ):
     try:
@@ -84,14 +84,14 @@ async def load_diarization(
 
 
 @router.post("/diarization/unload", dependencies=[Depends(require_api_key)])
-async def unload_diarization(
+def unload_diarization(
     diarization: DiarizationModelManager = Depends(get_diarization_manager),
 ):
     return diarization.unload_model()
 
 
 @router.post("/vad/load", dependencies=[Depends(require_api_key)])
-async def load_vad(
+def load_vad(
     vad: VadModelManager = Depends(get_vad_manager),
 ):
     try:
@@ -101,14 +101,14 @@ async def load_vad(
 
 
 @router.post("/vad/unload", dependencies=[Depends(require_api_key)])
-async def unload_vad(
+def unload_vad(
     vad: VadModelManager = Depends(get_vad_manager),
 ):
     return vad.unload_model()
 
 
 @router.post("/forced-alignment/load", dependencies=[Depends(require_api_key)])
-async def load_forced_alignment(
+def load_forced_alignment(
     forced_alignment: ForcedAlignmentModelManager = Depends(get_forced_alignment_manager),
 ):
     if forced_alignment.settings.method != "qwen":
@@ -120,7 +120,7 @@ async def load_forced_alignment(
 
 
 @router.post("/forced-alignment/unload", dependencies=[Depends(require_api_key)])
-async def unload_forced_alignment(
+def unload_forced_alignment(
     forced_alignment: ForcedAlignmentModelManager = Depends(get_forced_alignment_manager),
 ):
     return forced_alignment.unload_model()

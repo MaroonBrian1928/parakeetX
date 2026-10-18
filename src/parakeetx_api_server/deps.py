@@ -49,7 +49,10 @@ def get_vad_manager() -> VadModelManager:
 @lru_cache
 def get_forced_alignment_manager() -> ForcedAlignmentModelManager:
     settings = get_settings()
-    return ForcedAlignmentModelManager(settings.forced_alignment)
+    return ForcedAlignmentModelManager(
+        settings.forced_alignment,
+        idle_evict_minutes=settings.model_idle_evict_minutes,
+    )
 
 
 @lru_cache
