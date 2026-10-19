@@ -30,12 +30,12 @@ forced-alignment = [
 ]
 # Pick one: each pins the torch build its Docker image ships (see [tool.uv.sources]).
 cuda = [
-  "torch==2.10.0",
+  "torch==2.14.1+cu126",
   "torchaudio==2.10.0",
 ]
 # Maxwell/Pascal: cu126 is the newest torch flavor that still ships sm_50/sm_60 kernels.
 cuda-legacy = [
-  "torch==2.10.0",
+  "torch==2.14.1+cu126",
   "torchaudio==2.10.0",
 ]
 
