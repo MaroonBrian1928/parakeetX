@@ -174,3 +174,37 @@ def test_identical_audio_with_different_options_does_not_share_work(monkeypatch)
     assert diarized["diarization"] == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
     assert parakeet.call_count == 2
     assert diarization.call_count == 1
+
+
+class _CollapsingForcedAlignmentManager(_FakeForcedAlignmentManager):
+    def align_segments(self, path, *, segments, language):
+        _ = path
+        _ = language
+        return [{"word": "hello", "start": 0.9, "end": 0.9}]
+
+
+def test_collapsed_forced_alignment_keeps_native_word_timings(monkeypatch):
+    def fake_normalize(input_path, output_path):
+        shutil.copyfile(input_path, output_path)
+        return output_path
+
+    monkeypatch.setattr(transcription_module, "normalize_audio_to_wav", fake_normalize)
+    service = TranscriptionService(
+        parakeet_manager=_FakeParakeetManager(),
+        diarization_manager=_FakeDiarizationManager(),
+        vad_manager=_FakeVadManager(),
+        forced_alignment_manager=_CollapsingForcedAlignmentManager(),
+        max_concurrency=1,
+    )
+
+    result = asyncio.run(
+        service.transcribe_upload(
+            upload=_upload(b"audio"),
+            language=None,
+            diarize=False,
+            vad_options=_vad_options(),
+            forced_alignment=True,
+        )
+    )
+
+    assert result["words"] == [{"word": "hello", "start": 0.0, "end": 0.4}]

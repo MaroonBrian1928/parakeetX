@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import UploadFile
 
 from ..model_managers.diarization_manager import DiarizationModelManager
-from ..model_managers.forced_alignment_manager import ForcedAlignmentModelManager
+from ..model_managers.forced_alignment_manager import ForcedAlignmentModelManager, merge_aligned_words
 from ..model_managers.parakeet_manager import ParakeetModelManager
 from ..model_managers.vad_manager import VadModelManager, VadOptions
 from ..memory import release_memory_to_os
@@ -289,14 +289,20 @@ class TranscriptionService:
                     segments=list(asr_payload.get("segments", [])),
                     language=language or asr_payload.get("language"),
                 )
+                fallback_segments = 0
                 if aligned_words:
-                    asr_payload["words"] = aligned_words
+                    asr_payload["words"], fallback_segments = merge_aligned_words(
+                        list(asr_payload.get("words", [])),
+                        aligned_words,
+                        list(asr_payload.get("segments", [])),
+                    )
                 _emit_stage_timing(
                     "forced_alignment",
                     stage_started,
                     request_started=request_started,
                     extra=(
                         f"method=qwen words={len(asr_payload.get('words', []))} "
+                        f"native_fallback_segments={fallback_segments} "
                         f"{self._memory_note()}"
                     ),
                 )

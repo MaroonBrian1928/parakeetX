@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 import tempfile
 import time
+from bisect import bisect_right
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,12 @@ from .device_capability import (
 from .idle_eviction import IdleModelEvictor
 
 logger = logging.getLogger(__name__)
+
+# Aligned timings may sit this far outside their ASR segment before the segment
+# falls back to native Parakeet timings.
+_SEGMENT_TOLERANCE_SECONDS = 0.25
+# How many aligned words to skip when resynchronising after a token mismatch.
+_MATCH_LOOKAHEAD = 4
 
 
 _LANGUAGE_NAMES = {
@@ -325,3 +333,97 @@ def _offset_words(words: list[dict[str, Any]], *, offset: float) -> list[dict[st
         item["end"] = float(item.get("end", item["start"])) + offset
         output.append(item)
     return output
+
+
+def merge_aligned_words(
+    native_words: list[dict[str, Any]],
+    aligned_words: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Use aligned timings per ASR segment, falling back to native timings where they are implausible.
+
+    Qwen collapses words to a single instant (or drifts them seconds late) on fast crosstalk,
+    while Parakeet's own timings stay usable there. A segment keeps its aligned words only when
+    every native word maps to one and they are non-degenerate, ordered and inside the segment.
+    Returns the merged words and how many segments fell back.
+    """
+    if not native_words:
+        return aligned_words, 0
+    if not aligned_words:
+        return native_words, 0
+
+    matches = _match_aligned_words(native_words, aligned_words)
+    merged: list[dict[str, Any]] = []
+    fallback_segments = 0
+
+    for seg_start, seg_end, indices in _group_by_segment(native_words, segments):
+        candidate = [aligned_words[matches[i]] for i in indices if matches[i] is not None]
+        if len(candidate) == len(indices) and _plausible(candidate, seg_start, seg_end):
+            merged.extend(candidate)
+        else:
+            merged.extend(native_words[i] for i in indices)
+            fallback_segments += 1
+
+    return merged, fallback_segments
+
+
+def _normalize_token(word: Any) -> str:
+    return re.sub(r"[^\w']", "", str(word).lower().replace("\u2019", "'"))
+
+
+def _match_aligned_words(
+    native_words: list[dict[str, Any]],
+    aligned_words: list[dict[str, Any]],
+) -> list[int | None]:
+    aligned_tokens = [_normalize_token(w.get("word", "")) for w in aligned_words]
+    matches: list[int | None] = []
+    cursor = 0
+    for word in native_words:
+        token = _normalize_token(word.get("word", ""))
+        found = None
+        if token:
+            for k in range(cursor, min(cursor + _MATCH_LOOKAHEAD, len(aligned_tokens))):
+                if aligned_tokens[k] == token:
+                    found = k
+                    break
+        if found is not None:
+            cursor = found + 1
+        matches.append(found)
+    return matches
+
+
+def _group_by_segment(
+    native_words: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+) -> list[tuple[float, float, list[int]]]:
+    if not segments:
+        start = min(float(w.get("start", 0.0)) for w in native_words)
+        end = max(float(w.get("end", 0.0)) for w in native_words)
+        return [(start, end, list(range(len(native_words))))]
+
+    bounds = sorted((float(s.get("start", 0.0)), float(s.get("end", 0.0))) for s in segments)
+    starts = [start for start, _ in bounds]
+    groups: list[tuple[float, float, list[int]]] = []
+    current_index: int | None = None
+    for i, word in enumerate(native_words):
+        w_start = float(word.get("start", 0.0))
+        midpoint = w_start + max(0.0, float(word.get("end", w_start)) - w_start) / 2.0
+        segment_index = max(0, bisect_right(starts, midpoint) - 1)
+        if segment_index != current_index:
+            groups.append((*bounds[segment_index], []))
+            current_index = segment_index
+        groups[-1][2].append(i)
+    return groups
+
+
+def _plausible(words: list[dict[str, Any]], seg_start: float, seg_end: float) -> bool:
+    previous_start = float("-inf")
+    for word in words:
+        start = float(word.get("start", 0.0))
+        end = float(word.get("end", start))
+        if end <= start or start < previous_start:
+            return False
+        if start < seg_start - _SEGMENT_TOLERANCE_SECONDS or end > seg_end + _SEGMENT_TOLERANCE_SECONDS:
+            return False
+        previous_start = start
+    return True
