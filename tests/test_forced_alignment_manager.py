@@ -15,6 +15,7 @@ from parakeetx_api_server.model_managers.forced_alignment_manager import (
     _coalesce_text_segments,
     _offset_words,
     _language_name,
+    merge_aligned_words,
 )
 
 
@@ -128,3 +129,68 @@ def test_forced_alignment_survives_unload_mid_request(monkeypatch, tmp_path: Pat
 
     assert [w["word"] for w in words] == ["one", "two"]
     assert aligner.batches == 2
+
+
+def _w(word, start, end):
+    return {"word": word, "start": start, "end": end}
+
+
+def test_merge_aligned_words_falls_back_to_native_timings_where_alignment_collapses() -> None:
+    segments = [
+        {"start": 558.64, "end": 559.84, "text": "You're not even that cute."},
+        {"start": 560.0, "end": 562.48, "text": "you're not fucking cute."},
+    ]
+    native = [
+        _w("You're", 558.64, 558.88),
+        _w("not", 558.88, 559.04),
+        _w("even", 559.04, 559.28),
+        _w("that", 559.28, 559.52),
+        _w("cute.", 559.52, 559.84),
+        _w("you're", 561.44, 561.6),
+        _w("not", 561.6, 561.84),
+        _w("fucking", 561.84, 562.16),
+        _w("cute.", 562.16, 562.48),
+    ]
+    aligned = [
+        _w("You're", 558.7, 558.72),
+        _w("not", 558.72, 559.6),
+        _w("even", 559.6, 559.62),
+        _w("that", 559.62, 559.64),
+        _w("cute", 559.64, 559.68),
+        _w("you're", 563.2, 563.2),
+        _w("not", 563.2, 563.2),
+        _w("fucking", 563.2, 563.2),
+        _w("cute", 563.2, 566.16),
+    ]
+
+    merged, fallback_segments = merge_aligned_words(native, aligned, segments)
+
+    assert merged == aligned[:5] + native[5:]
+    assert fallback_segments == 1
+
+
+def test_merge_aligned_words_falls_back_when_alignment_text_diverges() -> None:
+    segments = [{"start": 0.0, "end": 1.0, "text": "well-known fact"}]
+    native = [_w("well-known", 0.0, 0.5), _w("fact", 0.5, 1.0)]
+    aligned = [_w("well", 0.0, 0.2), _w("known", 0.2, 0.5), _w("fact", 0.5, 1.0)]
+
+    assert merge_aligned_words(native, aligned, segments) == (native, 1)
+
+
+def test_merge_aligned_words_rejects_out_of_order_alignment() -> None:
+    segments = [{"start": 0.0, "end": 2.0, "text": "a b c"}]
+    native = [_w("a", 0.0, 0.5), _w("b", 0.5, 1.0), _w("c", 1.0, 1.5)]
+    aligned = [_w("a", 0.0, 0.4), _w("b", 0.9, 1.0), _w("c", 0.6, 0.8)]
+
+    assert merge_aligned_words(native, aligned, segments) == (native, 1)
+
+
+def test_merge_aligned_words_keeps_plausible_alignment() -> None:
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "Hello, there."},
+        {"start": 1.2, "end": 2.0, "text": "Bye."},
+    ]
+    native = [_w("Hello,", 0.0, 0.48), _w("there.", 0.48, 1.0), _w("Bye.", 1.2, 2.0)]
+    aligned = [_w("Hello", 0.02, 0.41), _w("there", 0.5, 0.93), _w("Bye", 1.25, 1.9)]
+
+    assert merge_aligned_words(native, aligned, segments) == (aligned, 0)
