@@ -27,18 +27,36 @@ def _reference_assign(items, diarization_segments):
 
 
 def _reference_segments_with_words(segments, words):
-    output = []
-    for segment in segments:
-        seg_start, seg_end = float(segment.get("start", 0.0)), float(segment.get("end", 0.0))
-        members = []
-        for word in words:
-            w_start = float(word.get("start", 0.0))
-            w_end = float(word.get("end", w_start))
-            mid = w_start + max(0.0, w_end - w_start) / 2.0
-            if seg_start <= mid <= seg_end:
-                members.append(word)
-        output.append({**segment, "words": members})
-    return output
+    def midpoint(word):
+        w_start = float(word.get("start", 0.0))
+        w_end = float(word.get("end", w_start))
+        return w_start + max(0.0, w_end - w_start) / 2.0
+
+    members = [[] for _ in segments]
+    for w_index, word in enumerate(words):
+        mid = midpoint(word)
+        containing = [
+            s_index
+            for s_index, segment in enumerate(segments)
+            if float(segment.get("start", 0.0)) <= mid <= float(segment.get("end", 0.0))
+        ]
+        if not containing:
+            ranked = []
+            for s_index, segment in enumerate(segments):
+                seg_start, seg_end = float(segment.get("start", 0.0)), float(segment.get("end", 0.0))
+                if seg_end < seg_start:
+                    continue
+                if seg_end < mid:
+                    ranked.append((mid - seg_end, 0, s_index))
+                else:
+                    ranked.append((seg_start - mid, 1, s_index))
+            containing = [min(ranked)[2]] if ranked else []
+        for s_index in containing:
+            members[s_index].append(w_index)
+    return [
+        {**segment, "words": [words[i] for i in indices]}
+        for segment, indices in zip(segments, members)
+    ]
 
 
 def _spans(rng, count, *, max_len, prefix):

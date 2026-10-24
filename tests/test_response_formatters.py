@@ -62,3 +62,25 @@ def test_srt_and_vtt_prefix_speaker_labels():
     assert "[SPEAKER_00] hello world" in srt
     assert "WEBVTT" in vtt
     assert "[SPEAKER_00] hello world" in vtt
+
+
+def _gap_payload():
+    return {
+        "text": "my brother's a huge fucking. Loser",
+        "segments": [
+            {"id": 0, "start": 478.2, "end": 479.8, "text": "my brother's a huge fucking."},
+            {"id": 1, "start": 480.2, "end": 486.1, "text": "Loser"},
+        ],
+        "words": [
+            {"word": "huge", "start": 479.36, "end": 479.76},
+            {"word": "fucking", "start": 479.8, "end": 480.08},
+            {"word": "Loser", "start": 480.08, "end": 480.48},
+        ],
+    }
+
+
+def test_verbose_json_keeps_words_that_fall_between_segments():
+    segments = as_verbose_json(_gap_payload())["segments"]
+
+    assert [w["word"] for w in segments[0]["words"]] == ["huge", "fucking"]
+    assert [w["word"] for w in segments[1]["words"]] == ["Loser"]
