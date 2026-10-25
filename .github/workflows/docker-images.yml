@@ -1,13 +1,18 @@
 name: Build and publish Docker images
 
+# Runs after every Release run on main, so a version tag cut by semantic-release already exists.
+# Tags created with GITHUB_TOKEN don't trigger workflows themselves, hence workflow_run.
+# Every build publishes <variant> and <variant>-<sha>; a released commit also gets
+# <variant>-<version> and <variant>-<major>.x.
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -15,8 +20,32 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  resolve:
+    name: Resolve commit and version
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Find the version tag on this commit
+        id: resolve
+        shell: bash
+        run: |
+          sha="$(git rev-parse HEAD)"
+          version="$(git tag --points-at "$sha" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 | sed 's/^v//')"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building $sha${version:+ as v$version}"
+
   build-and-push:
     name: Build and publish ${{ matrix.variant }} image
+    needs: resolve
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -43,13 +72,29 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - name: Prepare image metadata
         id: image
         shell: bash
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          VARIANT: ${{ matrix.variant }}
         run: |
-          image_name="${IMAGE_NAME,,}"
-          echo "name=${REGISTRY}/${image_name}" >> "${GITHUB_OUTPUT}"
+          name="${REGISTRY}/${IMAGE_NAME,,}"
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "tags<<EOF"
+            echo "${name}:${VARIANT}"
+            echo "${name}:${VARIANT}-${SHA}"
+            if [ -n "${VERSION}" ]; then
+              echo "${name}:${VARIANT}-${VERSION}"
+              echo "${name}:${VARIANT}-${VERSION%%.*}.x"
+            fi
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Free disk space for CUDA image build
         if: startsWith(matrix.variant, 'cuda')
@@ -82,13 +127,46 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ steps.image.outputs.name }}:${{ matrix.variant }}
-            ${{ steps.image.outputs.name }}:${{ matrix.variant }}-${{ github.sha }}
+          tags: ${{ steps.image.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
             org.opencontainers.image.title=ParakeetX API Server (${{ matrix.variant }})
           build-args: ${{ matrix.build-args }}
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=${{ matrix.cache-mode }},scope=${{ matrix.variant }}
+
+  release-notes:
+    name: Add image tags to the GitHub release
+    needs: [resolve, build-and-push]
+    if: ${{ needs.resolve.outputs.version != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Append the pull commands
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        shell: bash
+        run: |
+          tag="v${VERSION}"
+          image="${REGISTRY}/${IMAGE_NAME,,}"
+          body="$(gh release view "$tag" --json body --jq .body)"
+          if printf '%s' "$body" | grep -q '<!-- docker-images -->'; then
+            echo "Release notes already list the images."
+            exit 0
+          fi
+          section="$(
+            echo '<!-- docker-images -->'
+            echo '## Docker images'
+            echo
+            echo '```'
+            for variant in cuda cuda-legacy cpu; do
+              echo "docker pull ${image}:${variant}-${VERSION}"
+            done
+            echo '```'
+            echo
+            echo "Rolling tags: \`<variant>-${VERSION%%.*}.x\` follows this major version; \`<variant>\` follows main."
+          )"
+          gh release edit "$tag" --notes "$(printf '%s\n\n%s\n' "$body" "$section")"
