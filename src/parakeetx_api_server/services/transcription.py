@@ -289,9 +289,9 @@ class TranscriptionService:
                     segments=list(asr_payload.get("segments", [])),
                     language=language or asr_payload.get("language"),
                 )
-                fallback_segments = 0
+                fallback_words = 0
                 if aligned_words:
-                    asr_payload["words"], fallback_segments = merge_aligned_words(
+                    asr_payload["words"], fallback_words = merge_aligned_words(
                         list(asr_payload.get("words", [])),
                         aligned_words,
                         list(asr_payload.get("segments", [])),
@@ -302,7 +302,7 @@ class TranscriptionService:
                     request_started=request_started,
                     extra=(
                         f"method=qwen words={len(asr_payload.get('words', []))} "
-                        f"native_fallback_segments={fallback_segments} "
+                        f"native_fallback_words={fallback_words} "
                         f"{self._memory_note()}"
                     ),
                 )

@@ -163,10 +163,18 @@ def test_merge_aligned_words_falls_back_to_native_timings_where_alignment_collap
         _w("cute", 563.2, 566.16),
     ]
 
-    merged, fallback_segments = merge_aligned_words(native, aligned, segments)
+    merged, fallback_words = merge_aligned_words(native, aligned, segments)
 
     assert merged == aligned[:5] + native[5:]
-    assert fallback_segments == 1
+    assert fallback_words == 4
+
+
+def test_merge_aligned_words_keeps_plausible_words_beside_a_collapsed_one() -> None:
+    segments = [{"start": 0.0, "end": 1.5, "text": "a b c"}]
+    native = [_w("a", 0.0, 0.5), _w("b", 0.5, 1.0), _w("c", 1.0, 1.5)]
+    aligned = [_w("a", 0.05, 0.45), _w("b", 0.7, 0.7), _w("c", 1.02, 1.4)]
+
+    assert merge_aligned_words(native, aligned, segments) == ([aligned[0], native[1], aligned[2]], 1)
 
 
 def test_merge_aligned_words_falls_back_when_alignment_text_diverges() -> None:
@@ -182,7 +190,7 @@ def test_merge_aligned_words_rejects_out_of_order_alignment() -> None:
     native = [_w("a", 0.0, 0.5), _w("b", 0.5, 1.0), _w("c", 1.0, 1.5)]
     aligned = [_w("a", 0.0, 0.4), _w("b", 0.9, 1.0), _w("c", 0.6, 0.8)]
 
-    assert merge_aligned_words(native, aligned, segments) == (native, 1)
+    assert merge_aligned_words(native, aligned, segments) == ([aligned[0], aligned[1], native[2]], 1)
 
 
 def test_merge_aligned_words_keeps_plausible_alignment() -> None:
