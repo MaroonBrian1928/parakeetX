@@ -177,6 +177,26 @@ def test_merge_aligned_words_keeps_plausible_words_beside_a_collapsed_one() -> N
     assert merge_aligned_words(native, aligned, segments) == ([aligned[0], native[1], aligned[2]], 1)
 
 
+def test_merge_aligned_words_falls_back_on_late_words_that_precede_a_native_fallback() -> None:
+    segments = [{"start": 558.64, "end": 560.0, "text": "You're not even that cute."}]
+    native = [
+        _w("You're", 558.64, 558.88),
+        _w("not", 558.88, 559.04),
+        _w("even", 559.04, 559.28),
+        _w("that", 559.28, 559.52),
+        _w("cute.", 559.52, 559.84),
+    ]
+    aligned = [
+        _w("You're", 558.66, 558.86),
+        _w("not", 559.84, 559.92),
+        _w("even", 559.92, 559.92),
+        _w("that", 559.92, 561.12),
+        _w("cute", 561.12, 561.2),
+    ]
+
+    assert merge_aligned_words(native, aligned, segments) == ([aligned[0]] + native[1:], 4)
+
+
 def test_merge_aligned_words_falls_back_when_alignment_text_diverges() -> None:
     segments = [{"start": 0.0, "end": 1.0, "text": "well-known fact"}]
     native = [_w("well-known", 0.0, 0.5), _w("fact", 0.5, 1.0)]

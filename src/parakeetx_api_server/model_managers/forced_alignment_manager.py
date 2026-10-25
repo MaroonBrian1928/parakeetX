@@ -345,7 +345,9 @@ def merge_aligned_words(
     Qwen collapses words to a single instant (or drifts them seconds late) on fast crosstalk,
     while Parakeet's own timings stay usable there. Elsewhere Qwen's timings are the more precise,
     so each word keeps its aligned timing unless it is unmatched, zero-length, starts before the
-    previous word or sits outside its segment. Returns the merged words and how many fell back.
+    previous word or sits outside its segment. Aligned words that start after a following native
+    fallback fall back as well, so each segment stays in order. Returns the merged words and how
+    many fell back.
     """
     if not native_words:
         return aligned_words, 0
@@ -357,18 +359,32 @@ def merge_aligned_words(
     fallback_words = 0
 
     for seg_start, seg_end, indices in _group_by_segment(native_words, segments):
-        previous_start = float("-inf")
+        # (native index, chosen word, whether it is the aligned timing)
+        chosen: list[tuple[int, dict[str, Any], bool]] = []
         for i in indices:
+            previous_start = _start(chosen[-1][1]) if chosen else float("-inf")
             candidate = aligned_words[matches[i]] if matches[i] is not None else None
             if candidate is not None and _plausible(candidate, previous_start, seg_start, seg_end):
-                chosen = candidate
-            else:
-                chosen = native_words[i]
-                fallback_words += 1
-            merged.append(chosen)
-            previous_start = float(chosen.get("start", 0.0))
+                chosen.append((i, candidate, True))
+                continue
+            # A native word that starts before the aligned words already chosen shows those
+            # drifted late without failing the checks, so they fall back too.
+            threshold = _start(native_words[i])
+            j = len(chosen) - 1
+            while j >= 0 and chosen[j][2] and _start(chosen[j][1]) > threshold:
+                k = chosen[j][0]
+                chosen[j] = (k, native_words[k], False)
+                threshold = min(threshold, _start(native_words[k]))
+                j -= 1
+            chosen.append((i, native_words[i], False))
+        merged.extend(word for _, word, _ in chosen)
+        fallback_words += sum(1 for _, _, aligned in chosen if not aligned)
 
     return merged, fallback_words
+
+
+def _start(word: dict[str, Any]) -> float:
+    return float(word.get("start", 0.0))
 
 
 def _normalize_token(word: Any) -> str:
