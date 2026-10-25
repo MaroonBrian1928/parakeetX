@@ -16,8 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 nemo = [
-  # NeMo 3 changes checkpoint restore, which ParakeetModelManager hooks into; upgrade it deliberately.
-  "nemo-toolkit[asr]>=2.0.0,<3",
+  "nemo-toolkit[asr]>=3.0.0",
 ]
 diarization = [
   "pyannote.audio>=3.3.0",
@@ -56,8 +55,7 @@ conflicts = [[{ extra = "cuda" }, { extra = "cuda-legacy" }]]
 # NVRTC 13 (sm_75+ only, driver 580+); 12.x uses the NVRTC 12 that the cu126/cu128 torch wheels ship.
 # torch 2.11 requires cuda-bindings 13, which drops the Maxwell/Pascal GPUs the cuda-legacy image serves,
 # so torch and torchaudio stay on the 2.10 release.
-# librosa 1.0 is a major release under NeMo's audio preprocessing; move with the NeMo upgrade.
-constraint-dependencies = ["cuda-bindings<13", "librosa<1", "torch<2.11", "torchaudio<2.11"]
+constraint-dependencies = ["cuda-bindings<13", "torch<2.11", "torchaudio<2.11"]
 
 [tool.uv.sources]
 torch = [
