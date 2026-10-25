@@ -49,6 +49,11 @@
       "allowedVersions": "/^2\\.10\\.[0-9]+$/"
     },
     {
+      "description": "NeMo 3 changes checkpoint restore, which ParakeetModelManager hooks into; upgrade it by hand",
+      "matchDepNames": ["nemo-toolkit"],
+      "allowedVersions": "<3"
+    },
+    {
       "description": "Images pin Python 3.12 (UV_PYTHON); the ML stack lags new Python releases, so bump it by hand",
       "matchDepNames": ["python"],
       "allowedVersions": "<3.13"
