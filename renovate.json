@@ -44,6 +44,11 @@
       "allowedVersions": "<13"
     },
     {
+      "description": "torch 2.11+ needs cuda-bindings 13 (no Maxwell/Pascal); each extra pins its CUDA flavor through [tool.uv.sources], so plain 2.10.x versions only",
+      "matchDepNames": ["torch", "torchaudio"],
+      "allowedVersions": "/^2\\.10\\.[0-9]+$/"
+    },
+    {
       "description": "Images pin Python 3.12 (UV_PYTHON); the ML stack lags new Python releases, so bump it by hand",
       "matchDepNames": ["python"],
       "allowedVersions": "<3.13"
