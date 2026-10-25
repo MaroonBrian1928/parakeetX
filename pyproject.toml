@@ -53,8 +53,9 @@ build-backend = "hatchling.build"
 conflicts = [[{ extra = "cuda" }, { extra = "cuda-legacy" }]]
 # NeMo's CUDA-graph decoder compiles kernels through cuda-bindings' NVRTC. cuda-bindings 13 loads
 # NVRTC 13 (sm_75+ only, driver 580+); 12.x uses the NVRTC 12 that the cu126/cu128 torch wheels ship.
-# torch 2.11 requires cuda-bindings 13, so the lock settles on torch 2.10; keep torchaudio on the same release.
-constraint-dependencies = ["cuda-bindings<13", "torchaudio<2.11"]
+# torch 2.11 requires cuda-bindings 13, which drops the Maxwell/Pascal GPUs the cuda-legacy image serves,
+# so torch and torchaudio stay on the 2.10 release.
+constraint-dependencies = ["cuda-bindings<13", "torch<2.11", "torchaudio<2.11"]
 
 [tool.uv.sources]
 torch = [

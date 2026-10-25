@@ -77,6 +77,7 @@ conflicts = [[
 [manifest]
 constraints = [
     { name = "cuda-bindings", specifier = "<13" },
+    { name = "torch", specifier = "<2.11" },
     { name = "torchaudio", specifier = "<2.11" },
 ]
 
